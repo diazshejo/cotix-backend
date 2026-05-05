@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{{ quote.quote_number }}</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #222; font-size: 12px; }
+    header { border-bottom: 3px solid {{ quote.tenant.primary_color }}; margin-bottom: 20px; padding-bottom: 12px; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f3f5f7; }
+    .totals { margin-left: auto; width: 320px; }
+    .right { text-align: right; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{ quote.tenant.trade_name|default:quote.tenant.business_name }}</h1>
+    <div>{{ quote.tenant.business_name }} | NIT: {{ quote.tenant.nit|default:"CF" }}</div>
+    <div>{{ quote.tenant.email }} {{ quote.tenant.phone }}</div>
+    <div>{{ quote.tenant.address_line1 }} {{ quote.tenant.city }} {{ quote.tenant.department }}</div>
+  </header>
+
+  <h2>Cotizacion {{ quote.quote_number }}</h2>
+  <p class="muted">Estado: {{ quote.status }} | Emision: {{ quote.issue_date }} | Vence: {{ quote.expiry_date|default:"-" }}</p>
+
+  <section>
+    <h3>Cliente</h3>
+    <div>{{ quote.client.company_name|default:quote.client.name }}</div>
+    <div>{{ quote.client.email }} {{ quote.client.phone }}</div>
+    <div>NIT: {{ quote.client.nit|default:"CF" }}</div>
+  </section>
+
+  <h3>{{ quote.title }}</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Descripcion</th>
+        <th>Cantidad</th>
+        <th>Unidad</th>
+        <th>Precio</th>
+        <th>Descuento</th>
+        <th>Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in quote.items.all %}
+      <tr>
+        <td>{{ item.position }}</td>
+        <td>{{ item.description }}</td>
+        <td class="right">{{ item.quantity }}</td>
+        <td>{{ item.unit }}</td>
+        <td class="right">{{ item.unit_price }}</td>
+        <td class="right">{{ item.discount_amount }}</td>
+        <td class="right">{{ item.line_total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <table class="totals">
+    <tr><th>Subtotal</th><td class="right">{{ quote.subtotal }}</td></tr>
+    <tr><th>Descuentos</th><td class="right">{{ quote.discount_total }}</td></tr>
+    <tr><th>{{ quote.tenant.tax_label }} {{ quote.tax_rate_snapshot }}%</th><td class="right">{{ quote.total_tax }}</td></tr>
+    <tr><th>Total {{ quote.currency }}</th><td class="right"><strong>{{ quote.total }}</strong></td></tr>
+  </table>
+
+  {% if quote.notes %}<h3>Notas</h3><p>{{ quote.notes }}</p>{% endif %}
+  {% if quote.terms_conditions %}<h3>Terminos y condiciones</h3><p>{{ quote.terms_conditions }}</p>{% endif %}
+  {% if quote.tenant.default_footer_text %}<footer>{{ quote.tenant.default_footer_text }}</footer>{% endif %}
+</body>
+</html>
