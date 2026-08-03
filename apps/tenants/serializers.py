@@ -35,13 +35,17 @@ class TenantSerializer(serializers.ModelSerializer):
             "tax_label",
             "tax_rate",
             "prices_include_tax",
+            "website",
             "quote_prefix",
+            "quote_digits",
             "quote_next_number",
+            "plan",
             "default_footer_text",
+            "default_terms",
             "status",
             "is_active",
         ]
-        read_only_fields = ["id", "quote_next_number", "status", "is_active"]
+        read_only_fields = ["id", "slug", "quote_next_number", "plan", "status", "is_active"]
 
     def validate_business_name(self, value):
         value = clean_text(value)
@@ -77,3 +81,8 @@ class TenantSerializer(serializers.ModelSerializer):
 
     def validate_quote_prefix(self, value):
         return validate_quote_prefix(value)
+
+    def validate_quote_digits(self, value):
+        if not (1 <= value <= 10):
+            raise serializers.ValidationError("El numero de digitos debe estar entre 1 y 10.")
+        return value

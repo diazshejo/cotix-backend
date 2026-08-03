@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 
 from apps.common.models import SecurityEvent
+from apps.common.logging import RedactSensitiveFilter
 from apps.tenants.models import Tenant
 
 
@@ -43,3 +44,24 @@ class AdminHardeningTests(TestCase):
         self.assertFalse(event_admin.has_add_permission(request))
         self.assertFalse(event_admin.has_change_permission(request, event))
         self.assertFalse(event_admin.has_delete_permission(request, event))
+
+
+class LoggingRedactionTests(SimpleTestCase):
+    def test_redacts_authorization_and_api_keys(self):
+        import logging
+
+        record = logging.LogRecord(
+            name="cotix.security",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="Authorization: Bearer secret-token api-key: super-secret password=hidden",
+            args=(),
+            exc_info=None,
+        )
+
+        RedactSensitiveFilter().filter(record)
+
+        self.assertNotIn("secret-token", record.msg)
+        self.assertNotIn("super-secret", record.msg)
+        self.assertNotIn("hidden", record.msg)

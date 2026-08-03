@@ -1,9 +1,14 @@
+import datetime
+
 from django.db import transaction
-from django.db.models import Avg, Count, Sum
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.filters import OrderingFilter, SearchFilter
+from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -19,9 +24,12 @@ from apps.quotes.models import Quote, QuoteItem
 from apps.quotes.serializers import (
     PublicQuoteResponseSerializer,
     QuoteActivityLogSerializer,
+    QuoteItemSerializer,
+    QuoteListSerializer,
     QuoteSerializer,
 )
 from apps.quotes.services import (
+    count_monthly_quotes,
     is_quote_expired,
     log_quote_activity,
     next_quote_number,
@@ -29,19 +37,96 @@ from apps.quotes.services import (
     validate_quote_ready,
     validate_status_transition,
 )
+from apps.tenants.services.plans import QUOTA_MONTHLY_QUOTES, PlanService
+
+
+class PlanUsageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tenant = getattr(request.user, "tenant", None)
+        if not tenant or request.user.is_super_admin:
+            return Response({"monthly_quotes": {"used": 0, "limit": None}})
+        limits = PlanService.get_limits(tenant)
+        used = count_monthly_quotes(tenant)
+        return Response({
+            "monthly_quotes": {
+                "used": used,
+                "limit": limits.monthly_quotes,
+            },
+        })
+
+
+class QuotePagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
 
 
 class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
-    queryset = Quote.objects.select_related("tenant", "client", "created_by", "assigned_to").prefetch_related("items")
+    queryset = (
+        Quote.objects
+        .select_related("tenant", "client", "created_by", "assigned_to")
+        .prefetch_related("items__catalog_item")
+    )
     serializer_class = QuoteSerializer
     permission_classes = [IsAuthenticated, TenantRolePermission]
+    pagination_class = QuotePagination
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ["quote_number", "title", "client__name", "client__email"]
+    ordering_fields = ["created_at", "updated_at", "issue_date", "expiry_date", "total", "status", "quote_number"]
+    ordering = ["-created_at"]
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return QuoteListSerializer
+        return QuoteSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+
+        # Filtro por status: ?status=draft  o  ?status=draft,sent
+        status_param = params.get("status")
+        if status_param:
+            statuses = [s.strip() for s in status_param.split(",") if s.strip()]
+            if statuses:
+                qs = qs.filter(status__in=statuses)
+
+        # Rango de fecha de emisión: ?issue_from=YYYY-MM-DD  ?issue_to=YYYY-MM-DD
+        issue_from = params.get("issue_from")
+        if issue_from:
+            qs = qs.filter(issue_date__gte=issue_from)
+
+        issue_to = params.get("issue_to")
+        if issue_to:
+            qs = qs.filter(issue_date__lte=issue_to)
+
+        # Rango de vencimiento: ?expiry_from=YYYY-MM-DD  ?expiry_to=YYYY-MM-DD
+        expiry_from = params.get("expiry_from")
+        if expiry_from:
+            qs = qs.filter(expiry_date__gte=expiry_from)
+
+        expiry_to = params.get("expiry_to")
+        if expiry_to:
+            qs = qs.filter(expiry_date__lte=expiry_to)
+
+        # Filtro por cliente: ?client=<uuid>
+        client_id = params.get("client")
+        if client_id:
+            qs = qs.filter(client_id=client_id)
+
+        return qs
 
     def perform_create(self, serializer):
+        tenant = getattr(self.request.user, "tenant", None)
+        if tenant and not self.request.user.is_super_admin:
+            PlanService.require_quota(tenant, QUOTA_MONTHLY_QUOTES, count_monthly_quotes(tenant))
         serializer.save()
 
     def perform_destroy(self, instance):
         if instance.status != Quote.Status.DRAFT:
-            raise ValidationError("Only draft quotes can be deleted.")
+            raise ValidationError({"detail": "Solo puedes eliminar cotizaciones en borrador."})
         instance.soft_delete()
         log_quote_activity(instance, "deleted", actor=self.request.user, message="Quote deleted.")
 
@@ -88,7 +173,6 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         if to_email != quote.client.email:
             from django.core.validators import validate_email
             from django.core.exceptions import ValidationError as DjangoValidationError
-
             try:
                 validate_email(to_email)
             except DjangoValidationError:
@@ -115,20 +199,114 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
+class QuoteItemViewSet(viewsets.ModelViewSet):
+    """
+    CRUD granular de line items para una cotización en borrador.
+
+    Endpoints:
+      GET    /api/quotes/{quote_pk}/items/          → lista de items
+      POST   /api/quotes/{quote_pk}/items/          → agregar item
+      GET    /api/quotes/{quote_pk}/items/{pk}/     → detalle de item
+      PATCH  /api/quotes/{quote_pk}/items/{pk}/     → actualizar item (parcial)
+      DELETE /api/quotes/{quote_pk}/items/{pk}/     → eliminar item
+    """
+    serializer_class = QuoteItemSerializer
+    permission_classes = [IsAuthenticated, TenantRolePermission]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def _get_quote(self) -> Quote:
+        user = self.request.user
+        qs = Quote.objects.filter(deleted_at__isnull=True)
+        if not user.is_super_admin:
+            if not user.tenant_id:
+                raise PermissionDenied("El usuario no pertenece a un tenant.")
+            qs = qs.filter(tenant=user.tenant)
+        return get_object_or_404(qs, pk=self.kwargs["quote_pk"])
+
+    def get_queryset(self):
+        quote = self._get_quote()
+        return (
+            QuoteItem.objects
+            .filter(quote=quote, deleted_at__isnull=True)
+            .select_related("catalog_item")
+            .order_by("position", "created_at")
+        )
+
+    def _require_draft(self, quote: Quote) -> None:
+        if quote.status != Quote.Status.DRAFT:
+            raise ValidationError({"detail": "Solo puedes modificar items de cotizaciones en borrador."})
+
+    def _apply_catalog_defaults(self, validated_data: dict, quote: Quote) -> dict:
+        """Rellena campos desde catalog_item y valida que los obligatorios estén presentes."""
+        catalog_item = validated_data.get("catalog_item")
+        extra: dict = {}
+        if catalog_item:
+            if catalog_item.tenant_id != quote.tenant_id:
+                raise ValidationError({"catalog_item": ["El item de catalogo no pertenece a tu tenant."]})
+            if not catalog_item.is_active or catalog_item.deleted_at:
+                raise ValidationError({"catalog_item": ["No puedes usar items de catalogo inactivos."]})
+            if not validated_data.get("description"):
+                extra["description"] = catalog_item.description or catalog_item.name
+            if not validated_data.get("unit"):
+                extra["unit"] = catalog_item.unit
+            if validated_data.get("unit_price") is None:
+                extra["unit_price"] = catalog_item.unit_price
+            if "taxable" not in validated_data:
+                extra["taxable"] = catalog_item.taxable
+
+        for field in ("description", "unit", "unit_price"):
+            if not validated_data.get(field) and not extra.get(field):
+                raise ValidationError({field: [f"'{field}' es obligatorio cuando no usas un item de catalogo."]})
+
+        return extra
+
+    def _next_position(self, quote: Quote) -> int:
+        last = (
+            QuoteItem.objects
+            .filter(quote=quote, deleted_at__isnull=True)
+            .values_list("position", flat=True)
+            .order_by("-position")
+            .first()
+        )
+        return (last or 0) + 1
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        quote = self._get_quote()
+        self._require_draft(quote)
+        extra = self._apply_catalog_defaults(serializer.validated_data, quote)
+        serializer.save(quote=quote, position=self._next_position(quote), **extra)
+        recalculate_quote(quote)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        quote = serializer.instance.quote
+        self._require_draft(quote)
+        serializer.save()
+        recalculate_quote(quote)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        quote = instance.quote
+        self._require_draft(quote)
+        instance.soft_delete()
+        recalculate_quote(quote)
+
+
 class PublicQuoteView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PublicQuoteViewThrottle]
 
-    def get_quote(self, token):
-        return get_object_or_404(Quote.objects.select_related("tenant", "client").prefetch_related("items"),
+    def _get_quote(self, token):
+        return get_object_or_404(
+            Quote.objects.select_related("tenant", "client").prefetch_related("items"),
             public_token=token,
             deleted_at__isnull=True,
         )
 
-    throttle_classes = [PublicQuoteViewThrottle]
-
     @extend_schema(responses=QuoteSerializer)
     def get(self, request, token):
-        quote = self.get_quote(token)
+        quote = self._get_quote(token)
         if is_quote_expired(quote) and quote.status in {Quote.Status.DRAFT, Quote.Status.SENT, Quote.Status.VIEWED}:
             validate_status_transition(quote.status, Quote.Status.EXPIRED)
             quote.status = Quote.Status.EXPIRED
@@ -164,31 +342,56 @@ class PublicQuoteRespondView(APIView):
 class DashboardReportView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self, request):
-        queryset = Quote.objects.filter(deleted_at__isnull=True)
+    def _get_queryset(self, request):
+        qs = Quote.objects.filter(deleted_at__isnull=True)
         if request.user.is_super_admin:
-            return queryset
-        return queryset.filter(tenant=request.user.tenant)
+            return qs
+        return qs.filter(tenant=request.user.tenant)
 
     def get(self, request):
-        queryset = self.get_queryset(request)
+        queryset = self._get_queryset(request)
         total_quoted = queryset.aggregate(value=Sum("total"))["value"] or 0
         total_accepted = queryset.filter(status=Quote.Status.ACCEPTED).aggregate(value=Sum("total"))["value"] or 0
-        quotes_sent = queryset.filter(status__in=[Quote.Status.SENT, Quote.Status.VIEWED, Quote.Status.ACCEPTED, Quote.Status.REJECTED]).count()
+        sent_statuses = [Quote.Status.SENT, Quote.Status.VIEWED, Quote.Status.ACCEPTED, Quote.Status.REJECTED]
+        quotes_sent = queryset.filter(status__in=sent_statuses).count()
         quotes_accepted = queryset.filter(status=Quote.Status.ACCEPTED).count()
         conversion_rate = round((quotes_accepted / quotes_sent) * 100, 2) if quotes_sent else 0
-        recent_quotes = queryset.select_related("client").prefetch_related("items").order_by("-created_at")[:5]
-        expiring_quotes = queryset.select_related("client").prefetch_related("items").filter(
-            status__in=[Quote.Status.DRAFT, Quote.Status.SENT, Quote.Status.VIEWED],
-            expiry_date__gte=timezone.localdate(),
-        ).order_by("expiry_date")[:5]
+        recent_quotes = queryset.select_related("client").order_by("-created_at")[:5]
+        expiring_quotes = (
+            queryset.select_related("client")
+            .filter(
+                status__in=[Quote.Status.DRAFT, Quote.Status.SENT, Quote.Status.VIEWED],
+                expiry_date__gte=timezone.localdate(),
+            )
+            .order_by("expiry_date")[:5]
+        )
         top_items = (
             QuoteItem.objects.filter(quote__in=queryset, deleted_at__isnull=True)
             .values("description")
             .annotate(times_quoted=Count("id"), total_amount=Sum("line_total"))
             .order_by("-times_quoted")[:5]
         )
-
+        six_months_ago = timezone.localdate() - datetime.timedelta(days=181)
+        monthly_raw = (
+            queryset
+            .filter(issue_date__gte=six_months_ago)
+            .annotate(month=TruncMonth("issue_date"))
+            .values("month")
+            .annotate(
+                sent=Count("id", filter=Q(status__in=sent_statuses + [Quote.Status.EXPIRED])),
+                accepted=Count("id", filter=Q(status=Quote.Status.ACCEPTED)),
+            )
+            .order_by("month")
+        )
+        conversion_series = [
+            {
+                "month": entry["month"].strftime("%b"),
+                "sent": entry["sent"],
+                "accepted": entry["accepted"],
+                "rate": round(entry["accepted"] / entry["sent"] * 100, 1) if entry["sent"] else 0,
+            }
+            for entry in monthly_raw
+        ]
         return Response(
             {
                 "total_quoted": total_quoted,
@@ -199,8 +402,8 @@ class DashboardReportView(APIView):
                 "quotes_accepted": quotes_accepted,
                 "quotes_rejected": queryset.filter(status=Quote.Status.REJECTED).count(),
                 "avg_quote_value": queryset.aggregate(value=Avg("total"))["value"] or 0,
-                "recent_quotes": QuoteSerializer(recent_quotes, many=True, context={"request": request}).data,
-                "expiring_quotes": QuoteSerializer(expiring_quotes, many=True, context={"request": request}).data,
+                "recent_quotes": QuoteListSerializer(recent_quotes, many=True).data,
+                "expiring_quotes": QuoteListSerializer(expiring_quotes, many=True).data,
                 "top_items": [
                     {
                         "item_name": item["description"],
@@ -209,6 +412,6 @@ class DashboardReportView(APIView):
                     }
                     for item in top_items
                 ],
-                "conversion_series": [],
+                "conversion_series": conversion_series,
             }
         )

@@ -1,75 +1,670 @@
 <!doctype html>
-<html>
+<html lang="es">
 <head>
   <meta charset="utf-8">
-  <title>{{ quote.quote_number }}</title>
+  <title>Cotizacion {{ quote.quote_number }}</title>
   <style>
-    body { font-family: Arial, sans-serif; color: #222; font-size: 12px; }
-    header { border-bottom: 3px solid {{ quote.tenant.primary_color }}; margin-bottom: 20px; padding-bottom: 12px; }
-    h1 { margin: 0 0 8px; font-size: 24px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-    th { background: #f3f5f7; }
-    .totals { margin-left: auto; width: 320px; }
-    .right { text-align: right; }
-    .muted { color: #666; }
+    /* ── PAGE ─────────────────────────────────────────── */
+    @page {
+      size: A4;
+      margin: 13mm 14mm 14mm;
+      @bottom-left {
+        content: "{{ quote.tenant.trade_name|default:quote.tenant.business_name }} · NIT {{ quote.tenant.nit|default:'CF' }}";
+        font-family: "DejaVu Sans", Arial, sans-serif;
+        font-size: 7.5px;
+        color: #94a3b8;
+      }
+      @bottom-right {
+        content: "Pagina " counter(page) " de " counter(pages) " · {{ quote.quote_number }}";
+        font-family: "DejaVu Sans", Arial, sans-serif;
+        font-size: 7.5px;
+        color: #94a3b8;
+        text-align: right;
+      }
+    }
+
+    /* ── TOKENS ────────────────────────────────────────── */
+    :root {
+      --brand:        {{ brand_color }};
+      --brand-light:  {{ brand_color_light }};
+      --brand-border: {{ brand_color_border }};
+      --ink:          #0f172a;
+      --body:         #1e293b;
+      --muted:        #475569;
+      --light:        #64748b;
+      --faint:        #94a3b8;
+      --soft:         #f8fafc;
+      --line:         #e2e8f0;
+      --line-soft:    #edf2f7;
+    }
+
+    /* ── RESET ─────────────────────────────────────────── */
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      color: var(--body);
+      font-family: "DejaVu Sans", "Helvetica Neue", Arial, sans-serif;
+      font-size: 10.5px;
+      line-height: 1.52;
+      background: #fff;
+    }
+
+    /* ── DOCUMENT WRAPPER ──────────────────────────────── */
+    .document {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       HEADER
+    ══════════════════════════════════════════════════════ */
+    .header {
+      background: var(--brand);
+      color: #fff;
+      padding: 32px 36px 0;
+      position: relative;
+      overflow: hidden;
+    }
+    /* decorative circles */
+    .header::before {
+      content: "";
+      position: absolute;
+      top: -90px; right: -50px;
+      width: 260px; height: 260px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.07);
+    }
+    .header::after {
+      content: "";
+      position: absolute;
+      bottom: -80px; right: 110px;
+      width: 160px; height: 160px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.04);
+    }
+
+    /* top row: company | quote */
+    .header-top {
+      display: table;
+      width: 100%;
+      position: relative;
+      z-index: 2;
+    }
+    .h-company, .h-quote {
+      display: table-cell;
+      vertical-align: top;
+    }
+    .h-quote {
+      text-align: right;
+      width: 40%;
+    }
+
+    /* logo row */
+    .brand-row {
+      display: table;
+      width: 100%;
+      margin-bottom: 0;
+    }
+    .logo, .company-copy {
+      display: table-cell;
+      vertical-align: middle;
+    }
+    .logo {
+      width: 56px; height: 56px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.18);
+      border: 1.5px solid rgba(255,255,255,0.26);
+      color: #fff;
+      font-size: 17px;
+      font-weight: 800;
+      text-align: center;
+      line-height: 54px;
+      overflow: hidden;
+    }
+    .logo img {
+      width: 56px; height: 56px;
+      object-fit: contain;
+      vertical-align: middle;
+    }
+    .company-copy { padding-left: 14px; }
+    .company-name {
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      margin: 0 0 5px;
+    }
+    .company-detail {
+      font-size: 9.5px;
+      color: rgba(255,255,255,0.68);
+      line-height: 1.7;
+    }
+
+    /* quote badge */
+    .eyebrow {
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 2.2px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.52);
+      margin-bottom: 8px;
+    }
+    .quote-number {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      line-height: 1;
+      margin-bottom: 14px;
+    }
+    .status-pill {
+      display: inline-block;
+      padding: 5px 14px;
+      border-radius: 999px;
+      border: 1.5px solid rgba(255,255,255,0.28);
+      background: rgba(255,255,255,0.12);
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+    }
+
+    /* meta bar */
+    .meta-row {
+      display: table;
+      width: 100%;
+      margin-top: 26px;
+      padding: 18px 0 20px;
+      border-top: 1px solid rgba(255,255,255,0.15);
+      position: relative;
+      z-index: 2;
+    }
+    .meta-cell {
+      display: table-cell;
+      width: 25%;
+      padding-right: 16px;
+      vertical-align: top;
+    }
+    .meta-key {
+      font-size: 7.5px;
+      font-weight: 800;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.50);
+      margin-bottom: 4px;
+    }
+    .meta-val {
+      font-size: 11px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       BODY
+    ══════════════════════════════════════════════════════ */
+    .body {
+      padding: 28px 36px 32px;
+    }
+
+    /* section label — reusable */
+    .section-label {
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 1.8px;
+      text-transform: uppercase;
+      color: var(--brand);
+      margin-bottom: 10px;
+    }
+
+    /* ── Parties ─────────────────────────────── */
+    .parties {
+      display: table;
+      width: 100%;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--line-soft);
+      margin-bottom: 22px;
+    }
+    .party {
+      display: table-cell;
+      width: 50%;
+      vertical-align: top;
+      padding-right: 26px;
+    }
+    .party:last-child { padding-right: 0; }
+    .party-name {
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--ink);
+      margin-bottom: 6px;
+      line-height: 1.3;
+    }
+    .party-info {
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.72;
+    }
+    .chip {
+      display: inline-block;
+      margin-top: 9px;
+      padding: 3px 10px;
+      border-radius: 6px;
+      background: var(--line-soft);
+      border: 1px solid var(--line);
+      color: var(--light);
+      font-size: 8.5px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Subject ─────────────────────────────── */
+    .subject { margin-bottom: 22px; }
+    .subject-label {
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 1.8px;
+      text-transform: uppercase;
+      color: var(--faint);
+      margin-bottom: 6px;
+    }
+    .subject-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--ink);
+      line-height: 1.35;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       ITEMS TABLE — Premium
+    ══════════════════════════════════════════════════════ */
+    .items-section { margin-top: 4px; }
+    .items-label {
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 1.8px;
+      text-transform: uppercase;
+      color: var(--faint);
+      margin-bottom: 9px;
+    }
+    table.items {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    .items thead { display: table-header-group; }
+    .items tr { page-break-inside: avoid; break-inside: avoid; }
+
+    /* Branded header */
+    .items thead tr {
+      background: var(--brand-light);
+      border-top: 1.5px solid var(--brand-border);
+      border-bottom: 2px solid var(--brand-border);
+    }
+    .items th {
+      padding: 10px 8px;
+      text-align: left;
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--brand);
+    }
+
+    /* Alternating rows */
+    .items tbody tr:nth-child(odd)  { background: #ffffff; }
+    .items tbody tr:nth-child(even) { background: #f9fafb; }
+    .items tbody tr:last-child td { border-bottom: 1px solid var(--line); }
+    .items td {
+      padding: 11px 8px;
+      border-bottom: 1px solid var(--line-soft);
+      vertical-align: top;
+      font-size: 10px;
+      color: var(--body);
+    }
+
+    .right  { text-align: right; }
+    .center { text-align: center; }
+
+    .item-idx {
+      color: var(--faint);
+      font-weight: 800;
+      text-align: center;
+    }
+    .item-desc {
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .item-sku {
+      font-size: 8.2px;
+      color: var(--faint);
+      margin-top: 3px;
+    }
+    .money { white-space: nowrap; }
+    .discount-val {
+      text-align: right;
+      color: #dc2626;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .no-discount {
+      text-align: right;
+      color: var(--faint);
+    }
+    /* Branded subtotal column */
+    .line-total {
+      text-align: right;
+      font-weight: 800;
+      color: var(--brand);
+      white-space: nowrap;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       SUMMARY: notes + totals
+    ══════════════════════════════════════════════════════ */
+    .summary-grid {
+      display: table;
+      width: 100%;
+      margin-top: 24px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .notes-col, .totals-col {
+      display: table-cell;
+      vertical-align: top;
+    }
+    .notes-col {
+      width: 55%;
+      padding-right: 26px;
+    }
+    .note-block { margin-bottom: 16px; }
+    .note-title {
+      font-size: 8px;
+      font-weight: 800;
+      letter-spacing: 1.8px;
+      text-transform: uppercase;
+      color: var(--brand);
+      margin-bottom: 7px;
+    }
+    .note-text {
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.72;
+      white-space: pre-line;
+    }
+    .terms-text {
+      font-size: 9.5px;
+      color: var(--light);
+      line-height: 1.65;
+      white-space: pre-line;
+    }
+
+    /* ── Totals box ─────────────────────────── */
+    .totals-col { width: 45%; }
+    .totals-box {
+      background: var(--brand-light);
+      border: 1px solid var(--brand-border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .total-row {
+      display: table;
+      width: 100%;
+      border-bottom: 1px solid var(--brand-border);
+    }
+    .total-row:last-child { border-bottom: none; }
+    .total-lbl, .total-val {
+      display: table-cell;
+      padding: 9px 14px;
+      font-size: 10.2px;
+    }
+    .total-lbl { color: var(--light); font-weight: 500; }
+    .total-val  { color: var(--ink); font-weight: 800; text-align: right; white-space: nowrap; }
+
+    .total-row.discount .total-val { color: #dc2626; }
+
+    /* Grand total row */
+    .total-row.grand { background: var(--brand); }
+    .total-row.grand .total-lbl {
+      color: rgba(255,255,255,0.70);
+      font-size: 8.5px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+    .total-row.grand .total-val {
+      color: #fff;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       DOCUMENT FOOTER
+    ══════════════════════════════════════════════════════ */
+    .footer {
+      display: table;
+      width: 100%;
+      border-top: 1px solid var(--line-soft);
+      padding: 16px 36px 18px;
+    }
+    .footer-left, .footer-right {
+      display: table-cell;
+      width: 50%;
+      vertical-align: middle;
+      color: var(--faint);
+      font-size: 8.5px;
+      line-height: 1.55;
+    }
+    .footer-right { text-align: right; }
+    .footer-company {
+      font-weight: 700;
+      color: var(--light);
+      margin-bottom: 2px;
+    }
+    .powered strong { color: var(--brand); }
   </style>
 </head>
 <body>
-  <header>
-    <h1>{{ quote.tenant.trade_name|default:quote.tenant.business_name }}</h1>
-    <div>{{ quote.tenant.business_name }} | NIT: {{ quote.tenant.nit|default:"CF" }}</div>
-    <div>{{ quote.tenant.email }} {{ quote.tenant.phone }}</div>
-    <div>{{ quote.tenant.address_line1 }} {{ quote.tenant.city }} {{ quote.tenant.department }}</div>
-  </header>
+<main class="document">
 
-  <h2>Cotizacion {{ quote.quote_number }}</h2>
-  <p class="muted">Estado: {{ quote.status }} | Emision: {{ quote.issue_date }} | Vence: {{ quote.expiry_date|default:"-" }}</p>
+  <!-- ═══ HEADER ══════════════════════════════════════════ -->
+  <section class="header">
+    <div class="header-top">
 
-  <section>
-    <h3>Cliente</h3>
-    <div>{{ quote.client.company_name|default:quote.client.name }}</div>
-    <div>{{ quote.client.email }} {{ quote.client.phone }}</div>
-    <div>NIT: {{ quote.client.nit|default:"CF" }}</div>
+      <!-- Left: logo + company -->
+      <div class="h-company">
+        <div class="brand-row">
+          <div class="logo">
+            {% if quote.tenant.logo_url %}
+              <img src="{{ quote.tenant.logo_url }}" alt="{{ quote.tenant.trade_name|default:quote.tenant.business_name }}">
+            {% else %}
+              {{ quote.tenant.trade_name|default:quote.tenant.business_name|slice:":2"|upper }}
+            {% endif %}
+          </div>
+          <div class="company-copy">
+            <p class="company-name">{{ quote.tenant.trade_name|default:quote.tenant.business_name }}</p>
+            <div class="company-detail">
+              {{ quote.tenant.business_name }}{% if quote.tenant.nit %} &middot; NIT {{ quote.tenant.nit }}{% endif %}<br>
+              {% if quote.tenant.address_line1 %}{{ quote.tenant.address_line1 }}{% if quote.tenant.city %}, {{ quote.tenant.city }}{% endif %}{% if quote.tenant.department %}, {{ quote.tenant.department }}{% endif %}<br>{% endif %}
+              {{ quote.tenant.email }}{% if quote.tenant.phone %} &middot; {{ quote.tenant.phone }}{% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: quote badge -->
+      <div class="h-quote">
+        <div class="eyebrow">Cotizacion</div>
+        <div class="quote-number">#{{ quote.quote_number }}</div>
+        <div class="status-pill">{{ quote.get_status_display }}</div>
+      </div>
+
+    </div>
+
+    <!-- Meta bar -->
+    <div class="meta-row">
+      <div class="meta-cell">
+        <div class="meta-key">Fecha de emision</div>
+        <div class="meta-val">{{ quote.issue_date|date:"d/m/Y" }}</div>
+      </div>
+      <div class="meta-cell">
+        <div class="meta-key">Valida hasta</div>
+        <div class="meta-val">{{ quote.expiry_date|date:"d/m/Y"|default:"&mdash;" }}</div>
+      </div>
+      <div class="meta-cell">
+        <div class="meta-key">Moneda</div>
+        <div class="meta-val">{{ quote.currency }}</div>
+      </div>
+      <div class="meta-cell">
+        <div class="meta-key">Vendedor</div>
+        <div class="meta-val">{% firstof quote.assigned_to.get_full_name quote.created_by.get_full_name quote.created_by.email "&mdash;" %}</div>
+      </div>
+    </div>
   </section>
 
-  <h3>{{ quote.title }}</h3>
-  <table>
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Descripcion</th>
-        <th>Cantidad</th>
-        <th>Unidad</th>
-        <th>Precio</th>
-        <th>Descuento</th>
-        <th>Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for item in quote.items.all %}
-      <tr>
-        <td>{{ item.position }}</td>
-        <td>{{ item.description }}</td>
-        <td class="right">{{ item.quantity }}</td>
-        <td>{{ item.unit }}</td>
-        <td class="right">{{ item.unit_price }}</td>
-        <td class="right">{{ item.discount_amount }}</td>
-        <td class="right">{{ item.line_total }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <!-- ═══ BODY ════════════════════════════════════════════ -->
+  <section class="body">
 
-  <table class="totals">
-    <tr><th>Subtotal</th><td class="right">{{ quote.subtotal }}</td></tr>
-    <tr><th>Descuentos</th><td class="right">{{ quote.discount_total }}</td></tr>
-    <tr><th>{{ quote.tenant.tax_label }} {{ quote.tax_rate_snapshot }}%</th><td class="right">{{ quote.total_tax }}</td></tr>
-    <tr><th>Total {{ quote.currency }}</th><td class="right"><strong>{{ quote.total }}</strong></td></tr>
-  </table>
+    <!-- Parties -->
+    <div class="parties">
+      <div class="party">
+        <div class="section-label">Para cliente</div>
+        <div class="party-name">{{ quote.client.company_name|default:quote.client.name }}</div>
+        <div class="party-info">
+          {% if quote.client.company_name %}Contacto: {{ quote.client.name }}<br>{% endif %}
+          {% if quote.client.address_line1 %}{{ quote.client.address_line1 }}{% if quote.client.city %}, {{ quote.client.city }}{% endif %}{% if quote.client.department %}, {{ quote.client.department }}{% endif %}<br>{% endif %}
+          {% if quote.client.email %}{{ quote.client.email }}{% endif %}{% if quote.client.phone %} &middot; {{ quote.client.phone }}{% endif %}
+        </div>
+        <div class="chip">NIT: {{ quote.client.nit|default:"CF" }}</div>
+      </div>
+      <div class="party">
+        <div class="section-label">De empresa</div>
+        <div class="party-name">{{ quote.tenant.trade_name|default:quote.tenant.business_name }}</div>
+        <div class="party-info">
+          {{ quote.tenant.business_name }}<br>
+          {% if quote.tenant.address_line1 %}{{ quote.tenant.address_line1 }}{% if quote.tenant.city %}, {{ quote.tenant.city }}{% endif %}{% if quote.tenant.department %}, {{ quote.tenant.department }}{% endif %}<br>{% endif %}
+          {{ quote.tenant.email }}{% if quote.tenant.phone %} &middot; {{ quote.tenant.phone }}{% endif %}
+        </div>
+        <div class="chip">NIT: {{ quote.tenant.nit|default:"CF" }}</div>
+      </div>
+    </div>
 
-  {% if quote.notes %}<h3>Notas</h3><p>{{ quote.notes }}</p>{% endif %}
-  {% if quote.terms_conditions %}<h3>Terminos y condiciones</h3><p>{{ quote.terms_conditions }}</p>{% endif %}
-  {% if quote.tenant.default_footer_text %}<footer>{{ quote.tenant.default_footer_text }}</footer>{% endif %}
+    <!-- Subject -->
+    <div class="subject">
+      <div class="subject-label">Asunto / Proyecto</div>
+      <div class="subject-title">{{ quote.title }}</div>
+    </div>
+
+    <!-- Items table -->
+    <section class="items-section">
+      <div class="items-label">Detalle de productos y servicios</div>
+      <table class="items">
+        <thead>
+          <tr>
+            <th class="center" style="width:6%">#</th>
+            <th style="width:36%">Descripcion</th>
+            <th class="center" style="width:10%">Cant.</th>
+            <th class="center" style="width:10%">Unidad</th>
+            <th class="right"  style="width:13%">P. Unitario</th>
+            <th class="right"  style="width:12%">Descuento</th>
+            <th class="right"  style="width:13%">Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in quote.items.all %}
+            {% if not item.deleted_at %}
+            <tr>
+              <td class="item-idx">{{ item.position }}</td>
+              <td>
+                <div class="item-desc">{{ item.description }}</div>
+                {% if item.catalog_item and item.catalog_item.sku %}
+                  <div class="item-sku">SKU: {{ item.catalog_item.sku }}</div>
+                {% endif %}
+              </td>
+              <td class="center">{{ item.quantity|floatformat:2 }}</td>
+              <td class="center" style="color:var(--light)">{{ item.unit }}</td>
+              <td class="right money">{{ quote.currency }} {{ item.unit_price|floatformat:2 }}</td>
+              <td>
+                {% if item.discount_amount %}
+                  <div class="discount-val">&minus;{{ quote.currency }} {{ item.discount_amount|floatformat:2 }}</div>
+                {% else %}
+                  <div class="no-discount">&mdash;</div>
+                {% endif %}
+              </td>
+              <td class="line-total">{{ quote.currency }} {{ item.line_total|floatformat:2 }}</td>
+            </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Summary: notes + totals -->
+    <div class="summary-grid">
+
+      <!-- Notes -->
+      <div class="notes-col">
+        {% if quote.notes %}
+        <div class="note-block">
+          <div class="note-title">Notas para el cliente</div>
+          <div class="note-text">{{ quote.notes }}</div>
+        </div>
+        {% endif %}
+        {% if quote.terms_conditions %}
+        <div class="note-block">
+          <div class="note-title">Terminos y condiciones</div>
+          <div class="terms-text">{{ quote.terms_conditions }}</div>
+        </div>
+        {% endif %}
+        {% if not quote.notes and not quote.terms_conditions %}
+        <div class="note-block">
+          <div class="note-title">Nota</div>
+          <div class="note-text">Este documento fue generado digitalmente y es valido sin firma fisica.</div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Totals -->
+      <div class="totals-col">
+        <div class="totals-box">
+          <div class="total-row">
+            <div class="total-lbl">Subtotal</div>
+            <div class="total-val">{{ quote.currency }} {{ quote.subtotal|floatformat:2 }}</div>
+          </div>
+          <div class="total-row discount">
+            <div class="total-lbl">Descuentos</div>
+            <div class="total-val">&minus;{{ quote.currency }} {{ quote.discount_total|floatformat:2 }}</div>
+          </div>
+          <div class="total-row">
+            <div class="total-lbl">Base imponible</div>
+            <div class="total-val">{{ quote.currency }} {{ quote.taxable_base|floatformat:2 }}</div>
+          </div>
+          <div class="total-row">
+            <div class="total-lbl">{{ quote.tenant.tax_label }} {{ quote.tax_rate_snapshot|floatformat:2 }}%</div>
+            <div class="total-val">{{ quote.currency }} {{ quote.total_tax|floatformat:2 }}</div>
+          </div>
+          <div class="total-row grand">
+            <div class="total-lbl">Total</div>
+            <div class="total-val">{{ quote.currency }} {{ quote.total|floatformat:2 }}</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ═══ FOOTER ═══════════════════════════════════════════ -->
+  <footer class="footer">
+    <div class="footer-left">
+      <div class="footer-company">{{ quote.tenant.trade_name|default:quote.tenant.business_name }}</div>
+      <div>NIT: {{ quote.tenant.nit|default:"CF" }} &middot; Generado digitalmente, valido sin firma fisica</div>
+    </div>
+    <div class="footer-right">
+      <div class="powered">Generado con <strong>Cotix</strong></div>
+      <div>{{ quote.quote_number }}</div>
+    </div>
+  </footer>
+
+</main>
 </body>
 </html>

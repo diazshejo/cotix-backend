@@ -5,8 +5,7 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from apps.common.audit import get_client_ip, log_security_event
-from apps.common.models import SecurityEvent
+from apps.common.audit import get_client_ip
 from apps.users.models import User
 
 
@@ -18,6 +17,9 @@ def normalize_login_email(raw_email):
 
 
 def enforce_login_lockout(request):
+    from apps.telemetry.models import AuthEvent
+    from apps.telemetry.services.auth_telemetry import log_auth_event
+
     email = normalize_login_email(request.data.get("email", ""))
     ip_address = get_client_ip(request)
     if not email and not ip_address:
@@ -34,7 +36,10 @@ def enforce_login_lockout(request):
     last_success = None
     if email:
         last_success = (
-            SecurityEvent.objects.filter(event_type="login_success", metadata__email=email)
+            AuthEvent.objects.filter(
+                event_type=AuthEvent.EventType.LOGIN_SUCCESS,
+                metadata__email=email,
+            )
             .order_by("-created_at")
             .first()
         )
@@ -49,24 +54,24 @@ def enforce_login_lockout(request):
     if ip_address:
         identity_filter |= Q(ip_address=ip_address)
 
-    failures_in_window = SecurityEvent.objects.filter(
+    failures_in_window = AuthEvent.objects.filter(
         identity_filter,
-        event_type="login_failed",
+        event_type=AuthEvent.EventType.LOGIN_FAILED,
         created_at__gte=failure_start,
     ).count()
-    failures_in_lockout = SecurityEvent.objects.filter(
+    failures_in_lockout = AuthEvent.objects.filter(
         identity_filter,
-        event_type="login_failed",
+        event_type=AuthEvent.EventType.LOGIN_FAILED,
         created_at__gte=lockout_start,
     ).count()
 
     if failures_in_window >= settings.LOGIN_FAILED_LIMIT and failures_in_lockout >= settings.LOGIN_FAILED_LIMIT:
-        log_security_event(
-            "login_blocked",
+        log_auth_event(
+            AuthEvent.EventType.LOGIN_BLOCKED,
             request=request,
-            tenant=getattr(user, "tenant", None),
             user=user,
-            severity="warning",
+            tenant=getattr(user, "tenant", None),
+            success=False,
             metadata={"email": email},
         )
         raise ValidationError({"detail": LOGIN_LOCKOUT_MESSAGE})

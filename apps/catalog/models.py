@@ -47,10 +47,24 @@ class CatalogItem(BaseModel):
     currency = models.CharField(max_length=3, default="GTQ")
     taxable = models.BooleanField(default=True)
     is_active = models.BooleanField(default=True)
+    external_id = models.CharField(max_length=200, blank=True)
+    integration = models.ForeignKey(
+        "integrations.TenantCatalogIntegration",
+        on_delete=models.SET_NULL,
+        related_name="catalog_items",
+        null=True,
+        blank=True,
+    )
+    is_synced = models.BooleanField(default=False)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]
-        indexes = [models.Index(fields=["tenant", "name"]), models.Index(fields=["tenant", "sku"])]
+        indexes = [
+            models.Index(fields=["tenant", "name"]),
+            models.Index(fields=["tenant", "sku"]),
+            models.Index(fields=["tenant", "integration"]),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["tenant", "sku"],
@@ -59,6 +73,11 @@ class CatalogItem(BaseModel):
             ),
             models.CheckConstraint(condition=models.Q(unit_price__gte=0), name="ck_catalog_item_unit_price_gte_0"),
             models.CheckConstraint(condition=models.Q(currency__in=["GTQ", "USD"]), name="ck_catalog_item_currency_allowed"),
+            models.UniqueConstraint(
+                fields=["integration", "external_id"],
+                condition=~models.Q(external_id="") & models.Q(integration__isnull=False),
+                name="uq_catalog_item_integration_external_id",
+            ),
         ]
 
     def __str__(self):

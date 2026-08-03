@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+import sys
 from urllib.parse import urlparse
 
 from decouple import config
@@ -10,6 +11,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config("DJANGO_SECRET_KEY", default="change-me-only-for-local-development")
 DEBUG = config("DJANGO_DEBUG", default=True, cast=bool)
 ALLOWED_HOSTS = config("DJANGO_ALLOWED_HOSTS", default="localhost,127.0.0.1,testserver").split(",")
+if not DEBUG and SECRET_KEY == "change-me-only-for-local-development":
+    raise ValueError("DJANGO_SECRET_KEY must be configured for production.")
 
 DEFAULT_FRONTEND_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
 CORS_ALLOWED_ORIGINS = [
@@ -37,14 +40,19 @@ INSTALLED_APPS = [
     "apps.common",
     "apps.tenants",
     "apps.users",
+    "apps.telemetry",
     "apps.clients",
     "apps.catalog",
+    "apps.integrations",
     "apps.quotes",
     "apps.documents",
+    "apps.notifications",
 ]
 
 MIDDLEWARE = [
+    "apps.telemetry.middleware.RequestIdMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -99,6 +107,8 @@ else:
     }
 
 DB_SCHEMA = config("DB_SCHEMA", default="")
+if "test" in sys.argv:
+    DB_SCHEMA = config("TEST_DB_SCHEMA", default="")
 if DB_SCHEMA:
     DATABASES["default"]["OPTIONS"] = {
         "options": f"-c search_path={DB_SCHEMA}",
@@ -119,6 +129,10 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
@@ -134,6 +148,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "login": "5/min",
         "register": "3/hour",
+        "verify_email": "10/hour",
+        "verify_email_resend": "3/hour",
+        "password_reset": "5/hour",
         "send_email": "10/hour",
         "public_quote_respond": "10/hour",
         "public_quote_view": "60/hour",
@@ -162,16 +179,26 @@ SPECTACULAR_SETTINGS = {
 
 CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=False, cast=bool)
 CORS_ALLOW_CREDENTIALS = config("CORS_ALLOW_CREDENTIALS", default=True, cast=bool)
+if not DEBUG and CORS_ALLOW_ALL_ORIGINS:
+    raise ValueError("CORS_ALLOW_ALL_ORIGINS must be disabled for production.")
+if CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS:
+    raise ValueError("CORS_ALLOW_ALL_ORIGINS cannot be combined with credentialed requests.")
 
-EMAIL_BACKEND = config(
-    "EMAIL_BACKEND",
-    default="django.core.mail.backends.console.EmailBackend",
-)
-EMAIL_HOST = config("EMAIL_HOST", default="")
-EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
-EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
-EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
-EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+if DEBUG:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+else:
+    EMAIL_BACKEND = config(
+        "EMAIL_BACKEND",
+        default="django.core.mail.backends.smtp.EmailBackend",
+    )
+    EMAIL_HOST = config("EMAIL_HOST", default="smtp.resend.com")
+    EMAIL_PORT = config("EMAIL_PORT", default=465, cast=int)
+    EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="resend")
+    EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+    EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=False, cast=bool)
+    EMAIL_USE_SSL = config("EMAIL_USE_SSL", default=True, cast=bool)
+    if not EMAIL_HOST_PASSWORD:
+        raise ValueError("EMAIL_HOST_PASSWORD (Resend API key) must be set in production.")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="Cotix <no-reply@cotix.local>")
 
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
@@ -189,9 +216,29 @@ SECURE_CONTENT_TYPE_NOSNIFF = config("SECURE_CONTENT_TYPE_NOSNIFF", default=True
 X_FRAME_OPTIONS = config("X_FRAME_OPTIONS", default="DENY")
 USE_X_FORWARDED_HOST = config("USE_X_FORWARDED_HOST", default=False, cast=bool)
 
+# --- Stripe ---
+STRIPE_SECRET_KEY = config("STRIPE_SECRET_KEY", default="")
+STRIPE_WEBHOOK_SECRET = config("STRIPE_WEBHOOK_SECRET", default="")
+# Map (plan, interval) → Stripe Price ID. Set these in .env.
+STRIPE_PRICES: dict[tuple[str, str], str] = {
+    ("basic",    "monthly"): config("STRIPE_PRICE_BASIC_MONTHLY",    default=""),
+    ("premium",  "monthly"): config("STRIPE_PRICE_PREMIUM_MONTHLY",  default=""),
+    ("premium",  "annual"):  config("STRIPE_PRICE_PREMIUM_ANNUAL",   default=""),
+    ("business", "monthly"): config("STRIPE_PRICE_BUSINESS_MONTHLY", default=""),
+}
+
+EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS = config("EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS", default=24, cast=int)
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = config("PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", default=30, cast=int)
+
 LOGIN_FAILED_LIMIT = config("LOGIN_FAILED_LIMIT", default=5, cast=int)
 LOGIN_FAILED_WINDOW_MINUTES = config("LOGIN_FAILED_WINDOW_MINUTES", default=10, cast=int)
 LOGIN_LOCKOUT_MINUTES = config("LOGIN_LOCKOUT_MINUTES", default=15, cast=int)
+INTEGRATION_ENCRYPTION_KEY = config("INTEGRATION_ENCRYPTION_KEY", default=SECRET_KEY)
+INTEGRATION_REQUEST_TIMEOUT_SECONDS = config("INTEGRATION_REQUEST_TIMEOUT_SECONDS", default=15, cast=int)
+INTEGRATION_CSV_MAX_BYTES = config("INTEGRATION_CSV_MAX_BYTES", default=2 * 1024 * 1024, cast=int)
+INTEGRATION_CSV_MAX_ROWS = config("INTEGRATION_CSV_MAX_ROWS", default=5000, cast=int)
+INTEGRATION_CSV_MAX_FIELDS = config("INTEGRATION_CSV_MAX_FIELDS", default=50, cast=int)
+INTEGRATION_CSV_MAX_CELL_LENGTH = config("INTEGRATION_CSV_MAX_CELL_LENGTH", default=1000, cast=int)
 
 LOG_LEVEL = config("LOG_LEVEL", default="INFO")
 LOGGING = {

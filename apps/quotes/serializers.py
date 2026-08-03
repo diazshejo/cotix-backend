@@ -78,8 +78,56 @@ class QuoteItemSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class QuoteListSerializer(serializers.ModelSerializer):
+    """Serializer ligero para la lista — sin items anidados."""
+    client_name = serializers.CharField(source="client.name", read_only=True)
+
+    class Meta:
+        model = Quote
+        fields = [
+            "id",
+            "quote_number",
+            "title",
+            "status",
+            "client",
+            "client_name",
+            "issue_date",
+            "expiry_date",
+            "total",
+            "currency",
+            "public_token",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class QuoteSerializer(serializers.ModelSerializer):
     items = QuoteItemSerializer(many=True, required=True)
+    company_name = serializers.SerializerMethodField(read_only=True)
+    company_city = serializers.SerializerMethodField(read_only=True)
+    company_department = serializers.SerializerMethodField(read_only=True)
+    company_logo_url = serializers.SerializerMethodField(read_only=True)
+    company_primary_color = serializers.SerializerMethodField(read_only=True)
+    company_website = serializers.SerializerMethodField(read_only=True)
+
+    def get_company_name(self, obj):
+        return obj.tenant.trade_name or obj.tenant.business_name if obj.tenant_id else ""
+
+    def get_company_city(self, obj):
+        return obj.tenant.city if obj.tenant_id else ""
+
+    def get_company_department(self, obj):
+        return obj.tenant.department if obj.tenant_id else ""
+
+    def get_company_logo_url(self, obj):
+        return obj.tenant.logo_url if obj.tenant_id else ""
+
+    def get_company_primary_color(self, obj):
+        return obj.tenant.primary_color if obj.tenant_id else "#1a6fdb"
+
+    def get_company_website(self, obj):
+        return obj.tenant.website if obj.tenant_id else ""
 
     class Meta:
         model = Quote
@@ -106,6 +154,12 @@ class QuoteSerializer(serializers.ModelSerializer):
             "pdf_generated_at",
             "client_first_viewed_at",
             "client_responded_at",
+            "company_name",
+            "company_city",
+            "company_department",
+            "company_logo_url",
+            "company_primary_color",
+            "company_website",
             "items",
             "created_at",
             "updated_at",

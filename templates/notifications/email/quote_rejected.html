@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cotización Rechazada</title>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Helvetica Neue',Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:40px 0;">
+  <tr><td align="center">
+    <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+
+      <!-- Header -->
+      <tr>
+        <td style="background:#dc2626;padding:36px 40px;text-align:center;">
+          <div style="font-size:40px;margin-bottom:12px;">✗</div>
+          <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:800;letter-spacing:-0.3px;">
+            Cotización Rechazada
+          </h1>
+          <p style="margin:8px 0 0;color:rgba(255,255,255,.75);font-size:14px;">
+            Tu cliente no pudo avanzar con esta propuesta.
+          </p>
+        </td>
+      </tr>
+
+      <!-- Body -->
+      <tr>
+        <td style="padding:36px 40px;">
+          <p style="margin:0 0 20px;color:#334155;font-size:15px;line-height:1.6;">
+            Hola <strong>{{ user.get_full_name|default:user.email }}</strong>,
+          </p>
+          <p style="margin:0 0 28px;color:#475569;font-size:14px;line-height:1.7;">
+            <strong>{{ client_name }}</strong> ha <strong style="color:#dc2626;">rechazado</strong>
+            tu cotización en esta ocasión. Puedes revisarla y crear una versión actualizada cuando sea oportuno.
+          </p>
+
+          <!-- Detail card -->
+          <table width="100%" cellpadding="0" cellspacing="0"
+                 style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;margin-bottom:28px;">
+            <tr>
+              <td style="padding:20px 24px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding:6px 0;color:#6b7280;font-size:13px;">Cliente</td>
+                    <td style="padding:6px 0;color:#111827;font-size:13px;font-weight:700;text-align:right;">{{ client_name }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;color:#6b7280;font-size:13px;">Cotización</td>
+                    <td style="padding:6px 0;color:#111827;font-size:13px;font-weight:700;text-align:right;">#{{ quote.quote_number }}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;color:#6b7280;font-size:13px;">Total</td>
+                    <td style="padding:6px 0;color:#374151;font-size:15px;font-weight:800;text-align:right;">
+                      {{ quote.currency }} {{ quote.total|floatformat:2 }}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:6px 0;color:#6b7280;font-size:13px;">Rechazada el</td>
+                    <td style="padding:6px 0;color:#111827;font-size:13px;font-weight:700;text-align:right;">
+                      {{ quote.client_responded_at|date:"d/m/Y H:i" }}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+
+          <!-- CTA -->
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td align="center">
+                <a href="{{ quote_url }}"
+                   style="display:inline-block;background:#1e293b;color:#ffffff;text-decoration:none;
+                          font-size:14px;font-weight:700;padding:14px 32px;border-radius:8px;">
+                  Ver Cotización →
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+
+      <!-- Footer -->
+      <tr>
+        <td style="padding:20px 40px;border-top:1px solid #f1f5f9;text-align:center;">
+          <p style="margin:0;color:#94a3b8;font-size:11px;">
+            Este email fue generado por <strong>Cotix</strong>. No respondas a este correo.
+          </p>
+        </td>
+      </tr>
+
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>

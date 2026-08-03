@@ -1,5 +1,6 @@
-from decimal import Decimal
+import secrets
 import threading
+from decimal import Decimal
 
 from django.core.cache import cache
 from django.db import close_old_connections, transaction
@@ -13,8 +14,9 @@ from apps.common.models import SecurityEvent
 from apps.quotes.models import Quote, QuoteItem
 from apps.quotes.services import next_quote_number, recalculate_quote
 from apps.tenants.models import Tenant
-from apps.users.security import LOGIN_LOCKOUT_MESSAGE
+from apps.tenants.services.plans import PLAN_BASIC, PLAN_FREE, PLAN_PREMIUM
 from apps.users.models import User
+from apps.users.security import LOGIN_LOCKOUT_MESSAGE
 
 
 class ValidationHardeningTests(APITestCase):
@@ -284,6 +286,216 @@ class ValidationHardeningTests(APITestCase):
         self.assertEqual(len(numbers), len(set(numbers)))
 
 
+def _make_tenant(slug, plan=PLAN_BASIC):
+    return Tenant.objects.create(slug=slug, business_name=slug, email=f"{slug}@test.com", plan=plan)
+
+
+def _make_user(tenant, email=None, role=User.Role.TENANT_ADMIN):
+    email = email or f"admin-{tenant.slug}@test.com"
+    return User.objects.create_user(email=email, password="pass123", role=role, tenant=tenant, is_active=True)
+
+
+def _make_client(tenant):
+    return Client.objects.create(tenant=tenant, name="Cliente Test", email="cliente@test.com")
+
+
+def _bulk_quotes(tenant, client, user, count):
+    """Inserta `count` cotizaciones directamente en BD para simular uso mensual."""
+    Quote.objects.bulk_create([
+        Quote(
+            tenant=tenant,
+            quote_number=f"BULK-{i:06d}",
+            client=client,
+            created_by=user,
+            title=f"Cotizacion Bulk {i}",
+            issue_date=timezone.localdate(),
+            currency="GTQ",
+            tax_rate_snapshot=Decimal("12.00"),
+            status=Quote.Status.DRAFT,
+            public_token=secrets.token_hex(64),
+        )
+        for i in range(1, count + 1)
+    ])
+
+
+VALID_QUOTE_PAYLOAD = {
+    "title": "Test Plan Quota",
+    "issue_date": None,  # se rellena en cada test
+    "items": [
+        {
+            "description": "Servicio de prueba",
+            "quantity": "1.0000",
+            "unit": "hora",
+            "unit_price": "100.0000",
+            "taxable": True,
+        }
+    ],
+}
+
+
+class PlanQuotaTests(APITestCase):
+    """Flujo end-to-end: límites de cotizaciones y usuarios por plan."""
+
+    def setUp(self):
+        cache.clear()
+
+    def _payload(self, client_id):
+        return {**VALID_QUOTE_PAYLOAD, "client": str(client_id), "issue_date": str(timezone.localdate())}
+
+    # ── cotizaciones ──────────────────────────────────────────────────────────
+
+    def test_basic_plan_allows_50th_quote(self):
+        tenant = _make_tenant("basic-allow")
+        user = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, user, 49)  # 49 previas → la 50ª debe pasar
+
+        self.client.force_authenticate(user)
+        response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
+        self.assertEqual(response.status_code, 201)
+
+    def test_basic_plan_blocks_51st_quote(self):
+        tenant = _make_tenant("basic-block")
+        user = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, user, 50)  # 50 previas → la 51ª es 403
+
+        self.client.force_authenticate(user)
+        response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("50", response.data["detail"])
+        self.assertIn("cotizaciones", response.data["detail"].lower())
+
+    def test_basic_403_detail_triggers_isPlanRestriction_regex(self):
+        """El mensaje del 403 debe hacer match con el regex del frontend."""
+        import re
+        tenant = _make_tenant("basic-regex")
+        user = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, user, 50)
+
+        self.client.force_authenticate(user)
+        response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
+
+        detail = response.data["detail"]
+        # mismo regex que isPlanRestriction en client.ts
+        pattern = re.compile(r"plan|premium|business|actualiza|integraci|cotizaci|usuario", re.IGNORECASE)
+        self.assertTrue(pattern.search(detail), f"Regex no matchea: {detail!r}")
+
+    def test_free_plan_has_no_monthly_quote_limit(self):
+        tenant = _make_tenant("free-nolimit", plan=PLAN_FREE)
+        user = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, user, 200)  # muy por encima del límite basic
+
+        self.client.force_authenticate(user)
+        response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
+        self.assertEqual(response.status_code, 201)
+
+    def test_premium_plan_has_no_monthly_quote_limit(self):
+        tenant = _make_tenant("premium-nolimit", plan=PLAN_PREMIUM)
+        user = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, user, 200)
+
+        self.client.force_authenticate(user)
+        response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
+        self.assertEqual(response.status_code, 201)
+
+    def test_super_admin_bypasses_quota(self):
+        tenant = _make_tenant("basic-super")
+        admin = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, admin, 50)
+
+        super_admin = User.objects.create_user(
+            email="super@test.com", password="pass123",
+            role=User.Role.SUPER_ADMIN, is_active=True,
+        )
+        self.client.force_authenticate(super_admin)
+        # super_admin no tiene tenant → no aplica quota
+        # (tenant_admin tiene quota, super_admin no)
+        response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
+        # super_admin puede llegar al serializer (aunque falle por tenant mismatch,
+        # lo importante es que NO sea 403 de quota)
+        self.assertNotEqual(response.status_code, 403)
+
+    # ── plan-usage endpoint ───────────────────────────────────────────────────
+
+    def test_plan_usage_returns_used_and_limit_for_basic(self):
+        tenant = _make_tenant("basic-usage")
+        user = _make_user(tenant)
+        client = _make_client(tenant)
+        _bulk_quotes(tenant, client, user, 15)
+
+        self.client.force_authenticate(user)
+        response = self.client.get("/api/quotes/plan-usage/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["monthly_quotes"]["used"], 15)
+        self.assertEqual(response.data["monthly_quotes"]["limit"], 50)
+
+    def test_plan_usage_returns_null_limit_for_premium(self):
+        tenant = _make_tenant("premium-usage", plan=PLAN_PREMIUM)
+        user = _make_user(tenant)
+
+        self.client.force_authenticate(user)
+        response = self.client.get("/api/quotes/plan-usage/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["monthly_quotes"]["limit"])
+
+    def test_plan_usage_requires_authentication(self):
+        response = self.client.get("/api/quotes/plan-usage/")
+        self.assertEqual(response.status_code, 401)
+
+    # ── usuarios ──────────────────────────────────────────────────────────────
+
+    def test_basic_plan_blocks_second_user(self):
+        # plan basic: max_users=1. Ya hay 1 (el admin). El 2do debe ser 403.
+        tenant = _make_tenant("basic-users")
+        user = _make_user(tenant)  # usuario 1
+
+        self.client.force_authenticate(user)
+        response = self.client.post(
+            "/api/auth/users/",
+            {"email": "seller2@test.com", "password": "StrongPass123", "role": User.Role.SELLER},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("1", response.data["detail"])
+        self.assertIn("usuario", response.data["detail"].lower())
+
+    def test_premium_plan_allows_3_users(self):
+        tenant = _make_tenant("premium-users", plan=PLAN_PREMIUM)
+        admin = _make_user(tenant)  # usuario 1
+        _make_user(tenant, email="u2@test.com", role=User.Role.SELLER)  # usuario 2
+
+        self.client.force_authenticate(admin)
+        # crear usuario 3 → debe pasar
+        response = self.client.post(
+            "/api/auth/users/",
+            {"email": "u3@test.com", "password": "StrongPass123", "role": User.Role.SELLER},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_premium_plan_blocks_4th_user(self):
+        tenant = _make_tenant("premium-users-block", plan=PLAN_PREMIUM)
+        admin = _make_user(tenant)
+        _make_user(tenant, email="u2@premium.com", role=User.Role.SELLER)
+        _make_user(tenant, email="u3@premium.com", role=User.Role.VIEWER)
+        # ya hay 3 usuarios, el 4to debe ser 403
+
+        self.client.force_authenticate(admin)
+        response = self.client.post(
+            "/api/auth/users/",
+            {"email": "u4@premium.com", "password": "StrongPass123", "role": User.Role.SELLER},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("3", response.data["detail"])
+
+
 class QuoteNumberingConcurrencyTests(TransactionTestCase):
     reset_sequences = True
 
@@ -336,4 +548,5 @@ class QuoteNumberingConcurrencyTests(TransactionTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(numbers), 5)
         self.assertEqual(len(set(numbers)), 5)
-        self.assertEqual(sorted(numbers), [f"COT-{timezone.now().year}-{i:06d}" for i in range(1, 6)])
+        digits = self.tenant.quote_digits
+        self.assertEqual(sorted(numbers), [f"COT-{timezone.now().year}-{i:0{digits}d}" for i in range(1, 6)])

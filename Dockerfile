@@ -11,6 +11,8 @@ RUN apt-get update \
         libgdk-pixbuf-2.0-0 \
         libpango-1.0-0 \
         libpangocairo-1.0-0 \
+        libglib2.0-0 \
+        libffi8 \
         libpq5 \
     && rm -rf /var/lib/apt/lists/*
 

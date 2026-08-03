@@ -4,7 +4,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from apps.quotes.models import QuoteActivityLog
+from apps.quotes.models import Quote, QuoteActivityLog
 
 
 MONEY = Decimal("0.01")
@@ -97,7 +97,8 @@ def is_quote_expired(quote):
 @transaction.atomic
 def next_quote_number(tenant):
     locked_tenant = type(tenant).objects.select_for_update().get(pk=tenant.pk)
-    number = f"{locked_tenant.quote_prefix}-{timezone.now().year}-{locked_tenant.quote_next_number:06d}"
+    digits = getattr(locked_tenant, "quote_digits", 4)
+    number = f"{locked_tenant.quote_prefix}-{timezone.now().year}-{locked_tenant.quote_next_number:0{digits}d}"
     locked_tenant.quote_next_number += 1
     locked_tenant.save(update_fields=["quote_next_number", "updated_at"])
     return number
@@ -111,3 +112,14 @@ def log_quote_activity(quote, event, actor=None, message="", metadata=None):
         message=message,
         metadata=metadata or {},
     )
+
+
+def count_monthly_quotes(tenant) -> int:
+    """Cuenta cotizaciones no eliminadas creadas en el mes calendario actual."""
+    now = timezone.now()
+    return Quote.objects.filter(
+        tenant=tenant,
+        deleted_at__isnull=True,
+        created_at__year=now.year,
+        created_at__month=now.month,
+    ).count()

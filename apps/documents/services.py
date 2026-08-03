@@ -9,8 +9,23 @@ from apps.common.audit import log_security_event
 from apps.quotes.services import log_quote_activity, validate_quote_ready, validate_status_transition
 
 
+def _brand_rgba(hex_color: str, alpha: float) -> str:
+    hex_color = hex_color.lstrip("#")
+    try:
+        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+    except (ValueError, IndexError):
+        return f"rgba(26,111,219,{alpha})"
+
+
 def render_quote_html(quote):
-    return render_to_string("documents/quote_pdf.html", {"quote": quote})
+    brand = (getattr(quote.tenant, "primary_color", None) or "#1a6fdb").strip()
+    return render_to_string("documents/quote_pdf.html", {
+        "quote": quote,
+        "brand_color": brand,
+        "brand_color_light": _brand_rgba(brand, 0.08),
+        "brand_color_border": _brand_rgba(brand, 0.22),
+    })
 
 
 def generate_quote_pdf_response(quote, actor=None):
@@ -25,7 +40,13 @@ def generate_quote_pdf_response(quote, actor=None):
 
         pdf = HTML(string=html).write_pdf()
         content = pdf
-    except Exception:
+    except ImportError:
+        import logging
+        logging.getLogger(__name__).warning("WeasyPrint not available, falling back to ReportLab.")
+        content = generate_quote_reportlab_pdf(quote)
+    except OSError as exc:
+        import logging
+        logging.getLogger(__name__).warning("WeasyPrint native libraries missing (%s), falling back to ReportLab.", exc)
         content = generate_quote_reportlab_pdf(quote)
 
     quote.pdf_generated_at = timezone.now()
@@ -41,56 +62,218 @@ def generate_quote_reportlab_pdf(quote):
     from io import BytesIO
 
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=14 * mm, bottomMargin=16 * mm)
     styles = getSampleStyleSheet()
-    story = [
-        Paragraph(quote.tenant.trade_name or quote.tenant.business_name, styles["Title"]),
-        Paragraph(f"NIT: {quote.tenant.nit or 'CF'} | {quote.tenant.email}", styles["Normal"]),
-        Spacer(1, 14),
-        Paragraph(f"Cotizacion {quote.quote_number}", styles["Heading2"]),
-        Paragraph(f"Estado: {quote.status} | Emision: {quote.issue_date} | Vence: {quote.expiry_date or '-'}", styles["Normal"]),
-        Spacer(1, 12),
-        Paragraph("Cliente", styles["Heading3"]),
-        Paragraph(f"{quote.client.company_name or quote.client.name} | NIT: {quote.client.nit or 'CF'}", styles["Normal"]),
-        Spacer(1, 12),
+    brand = _reportlab_color(getattr(quote.tenant, "primary_color", "") or "#1a6fdb")
+    ink = colors.HexColor("#0f172a")
+    muted = colors.HexColor("#64748b")
+    soft = colors.HexColor("#f8fafc")
+    line = colors.HexColor("#e2e8f0")
+    danger = colors.HexColor("#dc2626")
+
+    styles.add(ParagraphStyle("PdfCompany", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=colors.white))
+    styles.add(ParagraphStyle("PdfHeaderSmall", parent=styles["Normal"], fontSize=8.5, leading=13, textColor=colors.Color(1, 1, 1, alpha=0.78)))
+    styles.add(ParagraphStyle("PdfQuoteNumber", parent=styles["Normal"], alignment=TA_RIGHT, fontName="Helvetica-Bold", fontSize=22, leading=25, textColor=colors.white))
+    styles.add(ParagraphStyle("PdfEyebrow", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=7.5, leading=10, textColor=muted, uppercase=True))
+    styles.add(ParagraphStyle("PdfPartyName", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=12.5, leading=16, textColor=ink))
+    styles.add(ParagraphStyle("PdfBody", parent=styles["Normal"], fontSize=9.2, leading=13.5, textColor=colors.HexColor("#475569")))
+    styles.add(ParagraphStyle("PdfSubject", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=13.5, leading=17, textColor=ink))
+    styles.add(ParagraphStyle("PdfItem", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=8.8, leading=12.5, textColor=ink))
+    styles.add(ParagraphStyle("PdfSmallMuted", parent=styles["Normal"], fontSize=8, leading=11, textColor=colors.HexColor("#94a3b8")))
+    styles.add(ParagraphStyle("PdfRight", parent=styles["Normal"], alignment=TA_RIGHT, fontSize=8.6, leading=11, textColor=ink))
+    styles.add(ParagraphStyle("PdfCenter", parent=styles["Normal"], alignment=TA_CENTER, fontSize=8.6, leading=11, textColor=ink))
+
+    company_lines = [
+        f"{quote.tenant.business_name} | NIT: {quote.tenant.nit or 'CF'}",
+        " ".join(part for part in [quote.tenant.address_line1, quote.tenant.city, quote.tenant.department] if part),
+        " | ".join(part for part in [quote.tenant.email, quote.tenant.phone] if part),
     ]
-    rows = [["#", "Descripcion", "Cant.", "Unidad", "Precio", "Desc.", "Total"]]
-    for item in quote.items.filter(deleted_at__isnull=True):
-        rows.append([
-            item.position,
-            item.description,
-            item.quantity,
-            item.unit,
-            item.unit_price,
-            item.discount_amount,
-            item.line_total,
-        ])
-    table = Table(rows, repeatRows=1)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+    company_lines = [line_text for line_text in company_lines if line_text.strip(" |")]
+    header = Table(
+        [
+            [
+                Paragraph(quote.tenant.trade_name or quote.tenant.business_name, styles["PdfCompany"]),
+                Paragraph("COTIZACION", _style(styles, "PdfHeaderSmall", alignment=TA_RIGHT)),
+            ],
+            [
+                Paragraph("<br/>".join(company_lines), styles["PdfHeaderSmall"]),
+                Paragraph(f"#{quote.quote_number}", styles["PdfQuoteNumber"]),
+            ],
+            [
+                Paragraph(f"Emision<br/><b>{quote.issue_date:%d/%m/%Y}</b>", styles["PdfHeaderSmall"]),
+                Paragraph(f"Vence<br/><b>{quote.expiry_date.strftime('%d/%m/%Y') if quote.expiry_date else '-'}</b>", _style(styles, "PdfHeaderSmall", alignment=TA_RIGHT)),
+            ],
+        ],
+        colWidths=[118 * mm, 50 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), brand),
+        ("BOX", (0, 0), (-1, -1), 0, brand),
+        ("LEFTPADDING", (0, 0), (-1, -1), 16),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+        ("TOPPADDING", (0, 0), (-1, 0), 18),
+        ("BOTTOMPADDING", (0, 2), (-1, 2), 16),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
-    story.extend([table, Spacer(1, 12)])
-    totals = Table([
-        ["Subtotal", quote.subtotal],
-        ["Descuentos", quote.discount_total],
-        [f"{quote.tenant.tax_label} {quote.tax_rate_snapshot}%", quote.total_tax],
-        [f"Total {quote.currency}", quote.total],
-    ], hAlign="RIGHT")
-    totals.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.25, colors.grey)]))
-    story.append(totals)
+
+    client_lines = [
+        f"Contacto: {quote.client.name}" if quote.client.company_name else "",
+        " ".join(part for part in [quote.client.address_line1, quote.client.city, quote.client.department] if part),
+        " | ".join(part for part in [quote.client.email, quote.client.phone] if part),
+        f"NIT: {quote.client.nit or 'CF'}",
+    ]
+    tenant_lines = [
+        quote.tenant.business_name,
+        " ".join(part for part in [quote.tenant.address_line1, quote.tenant.city, quote.tenant.department] if part),
+        " | ".join(part for part in [quote.tenant.email, quote.tenant.phone] if part),
+        f"NIT: {quote.tenant.nit or 'CF'}",
+    ]
+    parties = Table(
+        [
+            [Paragraph("PARA CLIENTE", _style(styles, "PdfEyebrow", textColor=brand)), Paragraph("DE EMPRESA", _style(styles, "PdfEyebrow", textColor=brand))],
+            [Paragraph(quote.client.company_name or quote.client.name, styles["PdfPartyName"]), Paragraph(quote.tenant.trade_name or quote.tenant.business_name, styles["PdfPartyName"])],
+            [Paragraph("<br/>".join(filter(None, client_lines)), styles["PdfBody"]), Paragraph("<br/>".join(filter(None, tenant_lines)), styles["PdfBody"])],
+        ],
+        colWidths=[82 * mm, 82 * mm],
+    )
+    parties.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+
+    story = [
+        header,
+        Spacer(1, 16),
+        parties,
+        Spacer(1, 12),
+        Paragraph("ASUNTO / PROYECTO", styles["PdfEyebrow"]),
+        Paragraph(quote.title, styles["PdfSubject"]),
+        Spacer(1, 16),
+        Paragraph("DETALLE DE PRODUCTOS Y SERVICIOS", styles["PdfEyebrow"]),
+        Spacer(1, 5),
+    ]
+
+    rows = [["#", "Descripcion", "Cant.", "Unidad", "P. unitario", "Desc.", "Subtotal"]]
+    for item in quote.items.filter(deleted_at__isnull=True):
+        description = Paragraph(str(item.description), styles["PdfItem"])
+        if item.catalog_item_id and getattr(item.catalog_item, "sku", ""):
+            description = Paragraph(f"{item.description}<br/><font color='#94a3b8' size='7'>SKU: {item.catalog_item.sku}</font>", styles["PdfItem"])
+        rows.append([
+            Paragraph(str(item.position), styles["PdfCenter"]),
+            description,
+            Paragraph(f"{item.quantity:.2f}", styles["PdfCenter"]),
+            Paragraph(item.unit, styles["PdfCenter"]),
+            Paragraph(f"{quote.currency} {item.unit_price:.2f}", styles["PdfRight"]),
+            Paragraph("-" if not item.discount_amount else f"{quote.currency} {item.discount_amount:.2f}", _style(styles, "PdfRight", textColor=danger)),
+            Paragraph(f"{quote.currency} {item.line_total:.2f}", _style(styles, "PdfRight", fontName="Helvetica-Bold")),
+        ])
+    table = Table(rows, repeatRows=1, colWidths=[9 * mm, 62 * mm, 17 * mm, 18 * mm, 24 * mm, 20 * mm, 26 * mm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), soft),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#7c8aa0")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 7.6),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.75, line),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.75, line),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.35, colors.HexColor("#edf2f7")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.extend([table, Spacer(1, 16)])
+
+    note_parts = []
     if quote.notes:
-        story.extend([Spacer(1, 12), Paragraph("Notas", styles["Heading3"]), Paragraph(quote.notes, styles["Normal"])])
+        note_parts.extend([Paragraph("NOTAS PARA EL CLIENTE", styles["PdfEyebrow"]), Paragraph(quote.notes, styles["PdfBody"]), Spacer(1, 8)])
     if quote.terms_conditions:
-        story.extend([Spacer(1, 12), Paragraph("Terminos y condiciones", styles["Heading3"]), Paragraph(quote.terms_conditions, styles["Normal"])])
-    doc.build(story)
+        note_parts.extend([Paragraph("TERMINOS Y CONDICIONES", styles["PdfEyebrow"]), Paragraph(quote.terms_conditions, styles["PdfBody"])])
+    if not note_parts:
+        note_parts = [Paragraph("NOTAS", styles["PdfEyebrow"]), Paragraph("Sin notas adicionales.", styles["PdfBody"])]
+
+    totals = Table([
+        ["Subtotal", f"{quote.currency} {quote.subtotal:.2f}"],
+        ["Descuentos", f"-{quote.currency} {quote.discount_total:.2f}"],
+        ["Base imponible", f"{quote.currency} {quote.taxable_base:.2f}"],
+        [f"{quote.tenant.tax_label} {quote.tax_rate_snapshot:.2f}%", f"{quote.currency} {quote.total_tax:.2f}"],
+        ["TOTAL", f"{quote.currency} {quote.total:.2f}"],
+    ], colWidths=[33 * mm, 32 * mm], hAlign="RIGHT")
+    totals.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -2), soft),
+        ("BOX", (0, 0), (-1, -1), 0.75, line),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.35, line),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -2), 8.8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("TEXTCOLOR", (0, 0), (-1, -2), colors.HexColor("#475569")),
+        ("TEXTCOLOR", (1, 1), (1, 1), danger),
+        ("BACKGROUND", (0, -1), (-1, -1), brand),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, -1), (0, -1), 9),
+        ("FONTSIZE", (1, -1), (1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+
+    summary = Table([[note_parts, totals]], colWidths=[96 * mm, 68 * mm])
+    summary.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 12),
+        ("RIGHTPADDING", (1, 0), (1, 0), 0),
+    ]))
+    story.append(KeepTogether(summary))
+
+    footer_text = quote.tenant.default_footer_text or "Este documento fue generado digitalmente y es valido sin firma fisica."
+    story.extend([Spacer(1, 14), Paragraph(footer_text, styles["PdfSmallMuted"])])
+    doc.build(story, onFirstPage=_draw_page_footer(quote), onLaterPages=_draw_page_footer(quote))
     return buffer.getvalue()
+
+
+def _reportlab_color(value):
+    from reportlab.lib import colors
+
+    try:
+        return colors.HexColor(value)
+    except Exception:
+        return colors.HexColor("#1a6fdb")
+
+
+def _style(styles, name, **overrides):
+    from reportlab.lib.styles import ParagraphStyle
+
+    base = styles[name]
+    return ParagraphStyle(f"{name}_{abs(hash(str(overrides)))}", parent=base, **overrides)
+
+
+def _draw_page_footer(quote):
+    def draw(canvas, doc):
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(colors.HexColor("#94a3b8"))
+        canvas.drawString(doc.leftMargin, 8 * mm, quote.tenant.trade_name or quote.tenant.business_name)
+        canvas.drawRightString(A4[0] - doc.rightMargin, 8 * mm, f"Pagina {doc.page} | {quote.quote_number}")
+        canvas.restoreState()
+
+    return draw
 
 
 def send_quote_email(quote, to_email, subject=None, body=None, actor=None):

@@ -40,10 +40,14 @@ class CatalogItemSerializer(serializers.ModelSerializer):
             "currency",
             "taxable",
             "is_active",
+            "external_id",
+            "integration",
+            "is_synced",
+            "last_synced_at",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "external_id", "integration", "is_synced", "last_synced_at", "created_at", "updated_at"]
 
     def validate_category(self, value):
         request = self.context["request"]

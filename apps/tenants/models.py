@@ -4,6 +4,8 @@ from django.db import models
 from django.db.models import Q
 
 from apps.common.models import BaseModel
+from apps.tenants.services.plans import PLAN_CHOICES as TENANT_PLAN_CHOICES
+from apps.tenants.services.plans import PLAN_FREE, PlanService
 
 
 class Tenant(BaseModel):
@@ -13,6 +15,7 @@ class Tenant(BaseModel):
         ("suspended", "Suspended"),
         ("cancelled", "Cancelled"),
     )
+    PLAN_CHOICES = TENANT_PLAN_CHOICES
 
     slug = models.SlugField(max_length=80, unique=True)
     business_name = models.CharField(max_length=200)
@@ -34,9 +37,15 @@ class Tenant(BaseModel):
     prices_include_tax = models.BooleanField(default=False)
     quote_prefix = models.CharField(max_length=10, default="COT")
     quote_next_number = models.PositiveIntegerField(default=1)
+    website = models.CharField(max_length=200, blank=True)
     default_footer_text = models.TextField(blank=True)
+    default_terms = models.TextField(blank=True)
+    quote_digits = models.PositiveSmallIntegerField(default=4)
+    plan = models.CharField(max_length=20, choices=PLAN_CHOICES, default=PLAN_FREE)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="demo")
     is_active = models.BooleanField(default=True)
+    stripe_customer_id = models.CharField(max_length=255, blank=True, default="")
+    stripe_subscription_id = models.CharField(max_length=255, blank=True, default="")
 
     class Meta:
         ordering = ["business_name"]
@@ -51,3 +60,6 @@ class Tenant(BaseModel):
 
     def __str__(self):
         return self.trade_name or self.business_name
+
+    def has_feature(self, feature_code):
+        return PlanService.has_feature(self, feature_code)

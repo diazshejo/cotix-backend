@@ -8,3 +8,7 @@ drf-spectacular
 weasyprint
 reportlab
 gunicorn
+whitenoise[brotli]
+cryptography
+user-agents
+stripe>=10.0,<12.0

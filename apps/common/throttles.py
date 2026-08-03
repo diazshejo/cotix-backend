@@ -17,6 +17,18 @@ class RegisterThrottle(BaseScopedThrottle):
     scope = "register"
 
 
+class VerifyEmailThrottle(BaseScopedThrottle):
+    scope = "verify_email"
+
+
+class VerifyEmailResendThrottle(BaseScopedThrottle):
+    scope = "verify_email_resend"
+
+
+class PasswordResetThrottle(BaseScopedThrottle):
+    scope = "password_reset"
+
+
 class SendEmailThrottle(SimpleRateThrottle):
     scope = "send_email"
 
