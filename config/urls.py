@@ -5,10 +5,11 @@ from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from apps.common.views import healthcheck
-from apps.tenants.views import BillingWebhookView
+from apps.tenants.views import BillingWebhookView, public_tenant_logo
 
 
 urlpatterns = [
+    path("media/logos/<uuid:tenant_id>.<str:extension>", public_tenant_logo, name="public-tenant-logo"),
     path("admin/", admin.site.urls),
     path("api/health/", healthcheck, name="healthcheck"),
     path("api/billing/webhook/", BillingWebhookView.as_view(), name="billing-webhook"),

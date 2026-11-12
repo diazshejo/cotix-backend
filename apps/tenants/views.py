@@ -4,6 +4,8 @@ from pathlib import Path
 
 import stripe
 from django.conf import settings
+from django.http import FileResponse, Http404
+from django.views.decorators.http import require_safe
 from PIL import Image, ImageOps, UnidentifiedImageError
 from rest_framework.generics import RetrieveUpdateAPIView
 from rest_framework.parsers import MultiPartParser
@@ -14,6 +16,7 @@ from rest_framework.views import APIView
 from apps.common.audit import log_security_event
 from apps.common.permissions import TenantBillingPermission, TenantSettingsPermission
 from apps.tenants.models import Tenant
+from apps.tenants.branding import tenant_logo_path
 from apps.tenants.serializers import TenantSerializer
 from apps.tenants.services.billing import BillingService
 
@@ -21,6 +24,25 @@ logger = logging.getLogger(__name__)
 
 _LOGO_ALLOWED_TYPES = {"image/png", "image/jpeg"}
 _LOGO_MAX_BYTES = 5 * 1024 * 1024
+
+
+@require_safe
+def public_tenant_logo(request, tenant_id, extension):
+    if extension not in {"png", "jpg", "jpeg"}:
+        raise Http404
+    tenant = Tenant.objects.filter(pk=tenant_id, deleted_at__isnull=True).first()
+    if tenant is None or tenant_logo_path(tenant) != f"{settings.MEDIA_URL}logos/{tenant_id}.{extension}":
+        raise Http404
+    logo = Path(settings.MEDIA_ROOT) / "logos" / f"{tenant_id}.{extension}"
+    try:
+        if logo.stat().st_size > _LOGO_MAX_BYTES:
+            raise Http404
+        response = FileResponse(logo.open("rb"), content_type="image/png" if extension == "png" else "image/jpeg")
+    except FileNotFoundError as exc:
+        raise Http404 from exc
+    response["Cache-Control"] = "public, no-cache"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 class LogoUploadView(APIView):

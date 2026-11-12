@@ -15,6 +15,7 @@ from apps.quotes.services import (
     validate_status_transition,
 )
 from apps.common.validators import clean_text, validate_currency
+from apps.tenants.branding import tenant_logo_url
 
 
 class QuoteItemSerializer(serializers.ModelSerializer):
@@ -141,7 +142,7 @@ class QuoteSerializer(serializers.ModelSerializer):
         return obj.tenant.department if obj.tenant_id else ""
 
     def get_company_logo_url(self, obj):
-        return obj.tenant.logo_url if obj.tenant_id else ""
+        return tenant_logo_url(obj.tenant, self.context.get("request")) if obj.tenant_id else ""
 
     def get_company_primary_color(self, obj):
         return obj.tenant.primary_color if obj.tenant_id else "#1a6fdb"
@@ -329,6 +330,7 @@ class PublicQuoteSerializer(serializers.ModelSerializer):
     company_logo_url = serializers.SerializerMethodField()
     company_primary_color = serializers.SerializerMethodField()
     company_website = serializers.SerializerMethodField()
+    company_footer_text = serializers.SerializerMethodField()
     acceptance = serializers.SerializerMethodField()
     consent_text = serializers.SerializerMethodField()
     items = PublicQuoteItemSerializer(many=True, read_only=True)
@@ -341,7 +343,7 @@ class PublicQuoteSerializer(serializers.ModelSerializer):
             "taxable_base", "tax_rate_snapshot", "prices_include_tax_snapshot",
             "total_tax", "total", "client_name", "company_name", "company_city",
             "company_department", "company_logo_url", "company_primary_color",
-            "company_website", "items", "change_request_message", "acceptance",
+            "company_website", "company_footer_text", "items", "change_request_message", "acceptance",
             "consent_text",
         ]
         read_only_fields = fields
@@ -359,13 +361,16 @@ class PublicQuoteSerializer(serializers.ModelSerializer):
         return obj.tenant.department
 
     def get_company_logo_url(self, obj):
-        return obj.tenant.logo_url
+        return tenant_logo_url(obj.tenant, self.context.get("request"))
 
     def get_company_primary_color(self, obj):
         return obj.tenant.primary_color
 
     def get_company_website(self, obj):
         return obj.tenant.website
+
+    def get_company_footer_text(self, obj):
+        return obj.tenant.default_footer_text
 
     def get_acceptance(self, obj):
         try:

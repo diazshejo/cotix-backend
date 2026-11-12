@@ -6,17 +6,19 @@ from tempfile import TemporaryDirectory
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from PIL import Image
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
 
 from django.test import TestCase
 from django.utils import timezone
 
 from apps.catalog.models import CatalogItem
 from apps.clients.models import Client
-from apps.documents.services import generate_quote_pdf_response, render_quote_html
+from apps.documents.services import generate_quote_pdf_response, generate_quote_reportlab_pdf, render_quote_html
 from apps.quotes.models import Quote, QuoteItem
+from apps.quotes.serializers import PublicQuoteSerializer
 from apps.quotes.services import next_quote_number, recalculate_quote
 from apps.tenants.models import Tenant
+from apps.tenants.serializers import TenantSerializer
 from apps.users.models import User
 
 
@@ -101,6 +103,26 @@ class QuotePdfTemplateTests(TestCase):
         self.assertIn("Base imponible", html)
         self.assertIn("Generado con <strong>Cotix</strong>", html)
         self.assertNotIn("<table class=\"totals\">", html)
+        self.assertIn("Cotizacion valida por 15 dias calendario.", html)
+
+    def test_light_brand_uses_dark_text_in_pdf(self):
+        self.tenant.primary_color = "#fff4bf"
+        self.tenant.save(update_fields=["primary_color"])
+        html = render_quote_html(self.make_quote())
+        self.assertIn("--brand-foreground: #0f172a", html)
+        self.assertIn("--brand-ink:    #0f172a", html)
+
+    def test_footer_length_is_bounded_by_backend(self):
+        serializer = TenantSerializer(self.tenant, data={"default_footer_text": "x" * 2001}, partial=True)
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("default_footer_text", serializer.errors)
+
+    def test_footer_text_is_escaped_in_pdf(self):
+        self.tenant.default_footer_text = "<script>alert(1)</script>"
+        self.tenant.save(update_fields=["default_footer_text"])
+        html = render_quote_html(self.make_quote())
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
 
     def test_quote_pdf_response_still_returns_pdf(self):
         response = generate_quote_pdf_response(self.make_quote(), actor=self.user)
@@ -115,6 +137,8 @@ class QuotePdfTemplateTests(TestCase):
         self.tenant.save(update_fields=["logo_url"])
         html = render_quote_html(quote)
         self.assertNotIn("127.0.0.1:12345", html)
+        request = APIRequestFactory().get("/api/public/quotes/example/")
+        self.assertEqual(PublicQuoteSerializer(quote, context={"request": request}).data["company_logo_url"], "")
         response = generate_quote_pdf_response(quote, actor=self.user)
         self.assertEqual(response["Content-Type"], "application/pdf")
 
@@ -132,6 +156,27 @@ class QuotePdfTemplateTests(TestCase):
             html = render_quote_html(self.make_quote())
             self.assertIn("data:image/png;base64,", html)
             self.assertNotIn(self.tenant.logo_url, html)
+            request = APIRequestFactory().get("/api/public/quotes/example/")
+            public_data = PublicQuoteSerializer(self.make_quote(), context={"request": request}).data
+            self.assertEqual(public_data["company_logo_url"], f"http://testserver/media/logos/{self.tenant.pk}.png")
+            self.assertEqual(public_data["company_footer_text"], self.tenant.default_footer_text)
+            self.assertEqual(TenantSerializer(self.tenant, context={"request": request}).data["logo_url"], public_data["company_logo_url"])
+            with override_settings(DEBUG=False):
+                logo_response = client.get(f"/media/logos/{self.tenant.pk}.png")
+            self.assertEqual(logo_response.status_code, 200)
+            self.assertEqual(logo_response["Content-Type"], "image/png")
+            self.assertTrue(b"".join(logo_response.streaming_content).startswith(b"\x89PNG"))
+            self.assertIn(b"/Subtype /Image", generate_quote_reportlab_pdf(self.make_quote()))
+
+    def test_public_logo_route_rejects_missing_or_foreign_files(self):
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root, DEBUG=False):
+            other = Tenant.objects.create(slug="other-pdf", business_name="Other", email="other@example.com")
+            logo_dir = Path(media_root) / "logos"
+            logo_dir.mkdir()
+            Image.new("RGB", (8, 8), "red").save(logo_dir / f"{other.pk}.png", format="PNG")
+            client = APIClient()
+            self.assertEqual(client.get(f"/media/logos/{other.pk}.png").status_code, 404)
+            self.assertEqual(client.get(f"/media/logos/{self.tenant.pk}.svg").status_code, 404)
 
     def test_legacy_local_jpeg_logo_remains_visible(self):
         with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):

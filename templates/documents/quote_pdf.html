@@ -26,6 +26,8 @@
     /* ── TOKENS ────────────────────────────────────────── */
     :root {
       --brand:        {{ brand_color }};
+      --brand-foreground: {{ brand_foreground }};
+      --brand-ink:    {{ brand_ink }};
       --brand-light:  {{ brand_color_light }};
       --brand-border: {{ brand_color_border }};
       --ink:          #0f172a;
@@ -61,7 +63,7 @@
     ══════════════════════════════════════════════════════ */
     .header {
       background: var(--brand);
-      color: #fff;
+      color: var(--brand-foreground);
       padding: 32px 36px 0;
       position: relative;
       overflow: hidden;
@@ -113,9 +115,9 @@
     .logo {
       width: 56px; height: 56px;
       border-radius: 14px;
-      background: rgba(255,255,255,0.18);
-      border: 1.5px solid rgba(255,255,255,0.26);
-      color: #fff;
+      background: #fff;
+      border: 1.5px solid rgba(15,23,42,0.10);
+      color: var(--ink);
       font-size: 17px;
       font-weight: 800;
       text-align: center;
@@ -136,7 +138,7 @@
     }
     .company-detail {
       font-size: 9.5px;
-      color: rgba(255,255,255,0.68);
+      color: var(--brand-foreground);
       line-height: 1.7;
     }
 
@@ -146,7 +148,7 @@
       font-weight: 800;
       letter-spacing: 2.2px;
       text-transform: uppercase;
-      color: rgba(255,255,255,0.52);
+      color: var(--brand-foreground);
       margin-bottom: 8px;
     }
     .quote-number {
@@ -189,13 +191,13 @@
       font-weight: 800;
       letter-spacing: 1.4px;
       text-transform: uppercase;
-      color: rgba(255,255,255,0.50);
+      color: var(--brand-foreground);
       margin-bottom: 4px;
     }
     .meta-val {
       font-size: 11px;
       font-weight: 700;
-      color: #fff;
+      color: var(--brand-foreground);
     }
 
     /* ══════════════════════════════════════════════════════
@@ -211,7 +213,7 @@
       font-weight: 800;
       letter-spacing: 1.8px;
       text-transform: uppercase;
-      color: var(--brand);
+      color: var(--brand-ink);
       margin-bottom: 10px;
     }
 
@@ -305,7 +307,7 @@
       font-weight: 800;
       letter-spacing: 0.8px;
       text-transform: uppercase;
-      color: var(--brand);
+      color: var(--brand-ink);
     }
 
     /* Alternating rows */
@@ -354,7 +356,7 @@
     .line-total {
       text-align: right;
       font-weight: 800;
-      color: var(--brand);
+      color: var(--brand-ink);
       white-space: nowrap;
     }
 
@@ -382,7 +384,7 @@
       font-weight: 800;
       letter-spacing: 1.8px;
       text-transform: uppercase;
-      color: var(--brand);
+      color: var(--brand-ink);
       margin-bottom: 7px;
     }
     .note-text {
@@ -425,14 +427,14 @@
     /* Grand total row */
     .total-row.grand { background: var(--brand); }
     .total-row.grand .total-lbl {
-      color: rgba(255,255,255,0.70);
+      color: var(--brand-foreground);
       font-size: 8.5px;
       font-weight: 800;
       letter-spacing: 1px;
       text-transform: uppercase;
     }
     .total-row.grand .total-val {
-      color: #fff;
+      color: var(--brand-foreground);
       font-size: 18px;
       font-weight: 800;
       letter-spacing: -0.3px;
@@ -461,7 +463,7 @@
       color: var(--light);
       margin-bottom: 2px;
     }
-    .powered strong { color: var(--brand); }
+    .powered strong { color: var(--brand-ink); }
   </style>
 </head>
 <body>
@@ -668,6 +670,7 @@
     <div class="footer-left">
       <div class="footer-company">{{ quote.tenant.trade_name|default:quote.tenant.business_name }}</div>
       <div>NIT: {{ quote.tenant.nit|default:"CF" }} &middot; Documento generado con Cotix</div>
+      {% if quote.tenant.default_footer_text %}<div>{{ quote.tenant.default_footer_text|linebreaksbr }}</div>{% endif %}
     </div>
     <div class="footer-right">
       <div class="powered">Generado con <strong>Cotix</strong></div>

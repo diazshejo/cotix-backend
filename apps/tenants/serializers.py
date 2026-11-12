@@ -10,14 +10,19 @@ from apps.common.validators import (
     validate_slug,
 )
 from apps.tenants.models import Tenant
+from apps.tenants.branding import tenant_logo_url
 from apps.tenants.services.plans import PlanService
 
 
 class TenantSerializer(serializers.ModelSerializer):
     trial_expired = serializers.SerializerMethodField()
+    logo_url = serializers.SerializerMethodField()
 
     def get_trial_expired(self, obj):
         return PlanService.trial_expired(obj)
+
+    def get_logo_url(self, obj):
+        return tenant_logo_url(obj, self.context.get("request"))
 
     class Meta:
         model = Tenant
@@ -78,6 +83,18 @@ class TenantSerializer(serializers.ModelSerializer):
 
     def validate_primary_color(self, value):
         return validate_hex_color(value)
+
+    def validate_default_footer_text(self, value):
+        value = clean_text(value)
+        if len(value) > 2000:
+            raise serializers.ValidationError("El pie de página no puede superar 2000 caracteres.")
+        return value
+
+    def validate_default_terms(self, value):
+        value = clean_text(value)
+        if len(value) > 10000:
+            raise serializers.ValidationError("Los términos no pueden superar 10000 caracteres.")
+        return value
 
     def validate_default_currency(self, value):
         return validate_currency(value)

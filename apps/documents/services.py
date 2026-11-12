@@ -2,7 +2,7 @@ from base64 import b64encode
 from html import escape
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlparse
+import re
 
 from django.conf import settings
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -14,6 +14,7 @@ from rest_framework.exceptions import ValidationError
 
 from apps.common.audit import log_security_event
 from apps.quotes.services import log_quote_activity, validate_quote_ready, validate_status_transition
+from apps.tenants.branding import tenant_logo_path
 
 
 def _brand_rgba(hex_color: str, alpha: float) -> str:
@@ -25,37 +26,53 @@ def _brand_rgba(hex_color: str, alpha: float) -> str:
         return f"rgba(26,111,219,{alpha})"
 
 
-def _logo_data_uri(tenant):
-    if not tenant.logo_url:
-        return ""
-    path = urlparse(tenant.logo_url).path
-    extension = Path(path).suffix.lower()
-    if extension not in {".png", ".jpg", ".jpeg"}:
-        return ""
-    expected = f"{settings.MEDIA_URL}logos/{tenant.pk}{extension}"
-    if path != expected:
-        return ""
-    logo = Path(settings.MEDIA_ROOT) / "logos" / f"{tenant.pk}{extension}"
+def _brand_luminance(hex_color: str) -> float:
+    channels = [int(hex_color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _brand_foreground(hex_color: str) -> str:
+    luminance = _brand_luminance(hex_color)
+    return "#0f172a" if (luminance + 0.05) / 0.059 > 1.05 / (luminance + 0.05) else "#ffffff"
+
+
+def _brand_ink(hex_color: str) -> str:
+    return hex_color if 1.05 / (_brand_luminance(hex_color) + 0.05) >= 4.5 else "#0f172a"
+
+
+def _logo_bytes(tenant):
+    path = tenant_logo_path(tenant)
+    if not path:
+        return b""
+    logo = Path(settings.MEDIA_ROOT) / "logos" / Path(path).name
     try:
         if logo.stat().st_size > 5 * 1024 * 1024:
-            return ""
+            return b""
         with Image.open(logo) as image:
             if image.format not in {"PNG", "JPEG"} or image.width > 4096 or image.height > 4096:
-                return ""
+                return b""
             image = ImageOps.exif_transpose(image)
             image.thumbnail((1024, 1024))
             mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
             output = BytesIO()
             image.convert(mode).save(output, format="PNG")
         if output.tell() > 5 * 1024 * 1024:
-            return ""
-        return "data:image/png;base64," + b64encode(output.getvalue()).decode("ascii")
+            return b""
+        return output.getvalue()
     except (FileNotFoundError, UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
-        return ""
+        return b""
+
+
+def _logo_data_uri(tenant):
+    logo = _logo_bytes(tenant)
+    return "data:image/png;base64," + b64encode(logo).decode("ascii") if logo else ""
 
 
 def render_quote_html(quote):
     brand = (getattr(quote.tenant, "primary_color", None) or "#1a6fdb").strip()
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", brand):
+        brand = "#1a6fdb"
     acceptance = getattr(quote, "acceptance", None)
     signature_lines = []
     if acceptance:
@@ -68,6 +85,8 @@ def render_quote_html(quote):
         "quote": quote,
         "items": quote.items.filter(deleted_at__isnull=True).select_related("catalog_item"),
         "brand_color": brand,
+        "brand_foreground": _brand_foreground(brand),
+        "brand_ink": _brand_ink(brand),
         "brand_color_light": _brand_rgba(brand, 0.08),
         "brand_color_border": _brand_rgba(brand, 0.22),
         "acceptance": acceptance,
@@ -115,22 +134,24 @@ def generate_quote_reportlab_pdf(quote):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import Image as PdfImage, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     from reportlab.graphics.shapes import Drawing, PolyLine
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=14 * mm, bottomMargin=16 * mm)
     styles = getSampleStyleSheet()
     brand = _reportlab_color(getattr(quote.tenant, "primary_color", "") or "#1a6fdb")
+    brand_fg = colors.HexColor(_brand_foreground(brand.hexval().replace("0x", "#")))
+    brand_ink = colors.HexColor(_brand_ink(brand.hexval().replace("0x", "#")))
     ink = colors.HexColor("#0f172a")
     muted = colors.HexColor("#64748b")
     soft = colors.HexColor("#f8fafc")
     line = colors.HexColor("#e2e8f0")
     danger = colors.HexColor("#dc2626")
 
-    styles.add(ParagraphStyle("PdfCompany", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=colors.white))
-    styles.add(ParagraphStyle("PdfHeaderSmall", parent=styles["Normal"], fontSize=8.5, leading=13, textColor=colors.Color(1, 1, 1, alpha=0.78)))
-    styles.add(ParagraphStyle("PdfQuoteNumber", parent=styles["Normal"], alignment=TA_RIGHT, fontName="Helvetica-Bold", fontSize=22, leading=25, textColor=colors.white))
+    styles.add(ParagraphStyle("PdfCompany", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=brand_fg))
+    styles.add(ParagraphStyle("PdfHeaderSmall", parent=styles["Normal"], fontSize=8.5, leading=13, textColor=brand_fg))
+    styles.add(ParagraphStyle("PdfQuoteNumber", parent=styles["Normal"], alignment=TA_RIGHT, fontName="Helvetica-Bold", fontSize=22, leading=25, textColor=brand_fg))
     styles.add(ParagraphStyle("PdfEyebrow", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=7.5, leading=10, textColor=muted, uppercase=True))
     styles.add(ParagraphStyle("PdfPartyName", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=12.5, leading=16, textColor=ink))
     styles.add(ParagraphStyle("PdfBody", parent=styles["Normal"], fontSize=9.2, leading=13.5, textColor=colors.HexColor("#475569")))
@@ -146,10 +167,23 @@ def generate_quote_reportlab_pdf(quote):
         " | ".join(part for part in [quote.tenant.email, quote.tenant.phone] if part),
     ]
     company_lines = [line_text for line_text in company_lines if line_text.strip(" |")]
+    company_heading = Paragraph(escape(quote.tenant.trade_name or quote.tenant.business_name), styles["PdfCompany"])
+    logo_bytes = _logo_bytes(quote.tenant)
+    if logo_bytes:
+        with Image.open(BytesIO(logo_bytes)) as logo_image:
+            scale = min(15 * mm / logo_image.width, 15 * mm / logo_image.height)
+            logo = PdfImage(BytesIO(logo_bytes), width=logo_image.width * scale, height=logo_image.height * scale)
+        company_heading = Table([[logo, company_heading]], colWidths=[18 * mm, 88 * mm], style=TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
     header = Table(
         [
             [
-                Paragraph(escape(quote.tenant.trade_name or quote.tenant.business_name), styles["PdfCompany"]),
+                company_heading,
                 Paragraph("COTIZACION", _style(styles, "PdfHeaderSmall", alignment=TA_RIGHT)),
             ],
             [
@@ -187,7 +221,7 @@ def generate_quote_reportlab_pdf(quote):
     ]
     parties = Table(
         [
-            [Paragraph("PARA CLIENTE", _style(styles, "PdfEyebrow", textColor=brand)), Paragraph("DE EMPRESA", _style(styles, "PdfEyebrow", textColor=brand))],
+            [Paragraph("PARA CLIENTE", _style(styles, "PdfEyebrow", textColor=brand_ink)), Paragraph("DE EMPRESA", _style(styles, "PdfEyebrow", textColor=brand_ink))],
             [Paragraph(escape(quote.client.company_name or quote.client.name), styles["PdfPartyName"]), Paragraph(escape(quote.tenant.trade_name or quote.tenant.business_name), styles["PdfPartyName"])],
             [Paragraph("<br/>".join(map(escape, filter(None, client_lines))), styles["PdfBody"]), Paragraph("<br/>".join(map(escape, filter(None, tenant_lines))), styles["PdfBody"])],
         ],
@@ -269,7 +303,7 @@ def generate_quote_reportlab_pdf(quote):
         ("TEXTCOLOR", (0, 0), (-1, -2), colors.HexColor("#475569")),
         ("TEXTCOLOR", (1, 1), (1, 1), danger),
         ("BACKGROUND", (0, -1), (-1, -1), brand),
-        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ("TEXTCOLOR", (0, -1), (-1, -1), brand_fg),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
         ("FONTSIZE", (0, -1), (0, -1), 9),
         ("FONTSIZE", (1, -1), (1, -1), 14),
