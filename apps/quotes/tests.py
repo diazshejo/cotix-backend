@@ -11,10 +11,11 @@ from rest_framework.test import APITestCase
 from apps.catalog.models import CatalogItem
 from apps.clients.models import Client
 from apps.common.models import SecurityEvent
+from apps.telemetry.models import AuthEvent
 from apps.quotes.models import Quote, QuoteItem
 from apps.quotes.services import next_quote_number, recalculate_quote
 from apps.tenants.models import Tenant
-from apps.tenants.services.plans import PLAN_BASIC, PLAN_FREE, PLAN_PREMIUM
+from apps.tenants.services.plans import PLAN_BASIC, PLAN_BUSINESS, PLAN_FREE, PLAN_PREMIUM
 from apps.users.models import User
 from apps.users.security import LOGIN_LOCKOUT_MESSAGE
 
@@ -29,12 +30,14 @@ class ValidationHardeningTests(APITestCase):
             password="StrongPass123",
             role=User.Role.TENANT_ADMIN,
             tenant=self.tenant,
+            email_verified=True,
         )
         self.other_user = User.objects.create_user(
             email="admin-b@example.com",
             password="StrongPass123",
             role=User.Role.TENANT_ADMIN,
             tenant=self.other_tenant,
+            email_verified=True,
         )
         self.seller = User.objects.create_user(
             email="seller-a@example.com",
@@ -139,6 +142,25 @@ class ValidationHardeningTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("internal_notes", response.data)
 
+    def test_draft_requires_publication_before_client_can_view(self):
+        quote = self.create_quote()
+        self.assertEqual(self.client.get(f"/api/public/quotes/{quote.public_token}/").status_code, 403)
+        response = self.client.post(f"/api/quotes/{quote.id}/publish/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], Quote.Status.SENT)
+        self.assertEqual(self.client.get(f"/api/public/quotes/{quote.public_token}/").status_code, 200)
+
+    def test_dashboard_period_excludes_older_quotes(self):
+        current = self.create_quote(status=Quote.Status.ACCEPTED)
+        older = self.create_quote(status=Quote.Status.ACCEPTED)
+        older.issue_date = timezone.localdate().replace(year=timezone.localdate().year - 1)
+        older.save(update_fields=["issue_date", "updated_at"])
+        response = self.client.get("/api/reports/dashboard/?period=month&currency=GTQ")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["quotes_created"], 1)
+        self.assertEqual(Decimal(str(response.data["total_quoted"])), current.total)
+        self.assertEqual(self.client.get("/api/reports/dashboard/?period=invalid").status_code, 400)
+
     def test_no_accept_expired_quote(self):
         quote = self.create_quote(status=Quote.Status.SENT, expiry_date=timezone.localdate() - timezone.timedelta(days=1))
         response = self.client.post(f"/api/public/quotes/{quote.public_token}/respond/", {"response": "accepted"}, format="json")
@@ -152,12 +174,14 @@ class ValidationHardeningTests(APITestCase):
         self.assertEqual(response.data["detail"], "Esta cotizacion ya fue respondida.")
 
     def test_tenant_admin_can_manage_users(self):
+        self.tenant.plan = PLAN_BUSINESS
+        self.tenant.save(update_fields=["plan"])
         response = self.client.post(
             "/api/auth/users/",
             {"email": "new-seller@example.com", "password": "StrongPass123", "role": User.Role.SELLER},
             format="json",
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201, response.data)
 
     def test_seller_cannot_manage_users(self):
         self.client.force_authenticate(self.seller)
@@ -207,13 +231,13 @@ class ValidationHardeningTests(APITestCase):
         self.client.force_authenticate(None)
         response = self.client.post("/api/auth/login/", {"email": self.user.email, "password": "StrongPass123"}, format="json")
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(SecurityEvent.objects.filter(event_type="login_success", user=self.user).exists())
+        self.assertTrue(AuthEvent.objects.filter(event_type=AuthEvent.EventType.LOGIN_SUCCESS, user=self.user).exists())
 
     def test_security_event_login_failed_created(self):
         self.client.force_authenticate(None)
         response = self.client.post("/api/auth/login/", {"email": self.user.email, "password": "bad"}, format="json")
         self.assertEqual(response.status_code, 401)
-        self.assertTrue(SecurityEvent.objects.filter(event_type="login_failed").exists())
+        self.assertTrue(AuthEvent.objects.filter(event_type=AuthEvent.EventType.LOGIN_FAILED).exists())
 
     def test_login_blocked_after_failed_attempts(self):
         self.client.force_authenticate(None)
@@ -234,7 +258,7 @@ class ValidationHardeningTests(APITestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["detail"], LOGIN_LOCKOUT_MESSAGE)
-        self.assertTrue(SecurityEvent.objects.filter(event_type="login_blocked").exists())
+        self.assertTrue(AuthEvent.objects.filter(event_type=AuthEvent.EventType.LOGIN_BLOCKED).exists())
 
     def test_login_success_resets_failed_attempt_window(self):
         self.client.force_authenticate(None)
@@ -383,15 +407,16 @@ class PlanQuotaTests(APITestCase):
         pattern = re.compile(r"plan|premium|business|actualiza|integraci|cotizaci|usuario", re.IGNORECASE)
         self.assertTrue(pattern.search(detail), f"Regex no matchea: {detail!r}")
 
-    def test_free_plan_has_no_monthly_quote_limit(self):
-        tenant = _make_tenant("free-nolimit", plan=PLAN_FREE)
+    def test_free_trial_uses_basic_monthly_quote_limit(self):
+        tenant = _make_tenant("free-basic-limit", plan=PLAN_FREE)
         user = _make_user(tenant)
         client = _make_client(tenant)
-        _bulk_quotes(tenant, client, user, 200)  # muy por encima del límite basic
+        _bulk_quotes(tenant, client, user, 50)
 
         self.client.force_authenticate(user)
         response = self.client.post("/api/quotes/", self._payload(client.id), format="json")
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("50", response.data["detail"])
 
     def test_premium_plan_has_no_monthly_quote_limit(self):
         tenant = _make_tenant("premium-nolimit", plan=PLAN_PREMIUM)

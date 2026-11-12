@@ -32,7 +32,7 @@ class NotificationService:
                 "user": user,
                 "quote": quote,
                 "client_name": quote.client.company_name or quote.client.name,
-                "quote_url": f"{settings.FRONTEND_URL}/quotes/{quote.id}",
+                "quote_url": f"{settings.FRONTEND_URL.rstrip('/')}/app/quotes/{quote.id}",
             },
         )
         return notification
@@ -59,7 +59,7 @@ class NotificationService:
                 "user": user,
                 "quote": quote,
                 "client_name": quote.client.company_name or quote.client.name,
-                "quote_url": f"{settings.FRONTEND_URL}/quotes/{quote.id}",
+                "quote_url": f"{settings.FRONTEND_URL.rstrip('/')}/app/quotes/{quote.id}",
             },
         )
         return notification

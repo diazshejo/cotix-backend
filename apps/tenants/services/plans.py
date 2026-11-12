@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
 
@@ -21,6 +22,7 @@ QUOTA_MONTHLY_QUOTES = "monthly_quotes"
 QUOTA_MAX_USERS = "max_users"
 
 UNLIMITED = None
+TRIAL_EXPIRED_MESSAGE = "Tu prueba gratuita de 30 días terminó. Actualiza tu plan para continuar."
 
 
 @dataclass(frozen=True)
@@ -44,9 +46,9 @@ FEATURES = {
     ),
 }
 
-# free = demo period, sin restricciones de quota (la restriccion es status=demo/suspended)
+# El registro inicia una prueba de 30 días con las capacidades del plan Básico.
 PLAN_LIMITS: dict[str, PlanLimits] = {
-    PLAN_FREE:     PlanLimits(monthly_quotes=UNLIMITED, max_users=UNLIMITED),
+    PLAN_FREE:     PlanLimits(monthly_quotes=50,        max_users=1),
     PLAN_BASIC:    PlanLimits(monthly_quotes=50,        max_users=1),
     PLAN_PREMIUM:  PlanLimits(monthly_quotes=UNLIMITED, max_users=3),
     PLAN_BUSINESS: PlanLimits(monthly_quotes=UNLIMITED, max_users=UNLIMITED),
@@ -76,6 +78,15 @@ def require_feature(tenant, feature_code: str) -> None:
 
 
 class PlanService:
+    @staticmethod
+    def trial_expired(tenant) -> bool:
+        return bool(tenant and tenant.plan == PLAN_FREE and timezone.now() >= tenant.trial_ends_at)
+
+    @staticmethod
+    def require_active_trial(tenant) -> None:
+        if PlanService.trial_expired(tenant):
+            raise PermissionDenied(TRIAL_EXPIRED_MESSAGE)
+
     @staticmethod
     def has_feature(tenant, feature_code: str) -> bool:
         return tenant_has_feature(tenant, feature_code)

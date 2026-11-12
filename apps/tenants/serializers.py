@@ -10,9 +10,15 @@ from apps.common.validators import (
     validate_slug,
 )
 from apps.tenants.models import Tenant
+from apps.tenants.services.plans import PlanService
 
 
 class TenantSerializer(serializers.ModelSerializer):
+    trial_expired = serializers.SerializerMethodField()
+
+    def get_trial_expired(self, obj):
+        return PlanService.trial_expired(obj)
+
     class Meta:
         model = Tenant
         fields = [
@@ -43,9 +49,11 @@ class TenantSerializer(serializers.ModelSerializer):
             "default_footer_text",
             "default_terms",
             "status",
+            "trial_ends_at",
+            "trial_expired",
             "is_active",
         ]
-        read_only_fields = ["id", "slug", "quote_next_number", "plan", "status", "is_active"]
+        read_only_fields = ["id", "slug", "logo_url", "quote_next_number", "plan", "status", "trial_ends_at", "trial_expired", "is_active"]
 
     def validate_business_name(self, value):
         value = clean_text(value)

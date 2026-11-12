@@ -475,8 +475,8 @@
       <div class="h-company">
         <div class="brand-row">
           <div class="logo">
-            {% if quote.tenant.logo_url %}
-              <img src="{{ quote.tenant.logo_url }}" alt="{{ quote.tenant.trade_name|default:quote.tenant.business_name }}">
+            {% if logo_data_uri %}
+              <img src="{{ logo_data_uri }}" alt="{{ quote.tenant.trade_name|default:quote.tenant.business_name }}">
             {% else %}
               {{ quote.tenant.trade_name|default:quote.tenant.business_name|slice:":2"|upper }}
             {% endif %}
@@ -571,8 +571,7 @@
           </tr>
         </thead>
         <tbody>
-          {% for item in quote.items.all %}
-            {% if not item.deleted_at %}
+          {% for item in items %}
             <tr>
               <td class="item-idx">{{ item.position }}</td>
               <td>
@@ -593,7 +592,6 @@
               </td>
               <td class="line-total">{{ quote.currency }} {{ item.line_total|floatformat:2 }}</td>
             </tr>
-            {% endif %}
           {% endfor %}
         </tbody>
       </table>

@@ -1,4 +1,11 @@
+from base64 import b64encode
+from html import escape
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import urlparse
+
 from django.conf import settings
+from PIL import Image, ImageOps, UnidentifiedImageError
 from django.core.mail import EmailMessage
 from django.http import HttpResponse
 from django.template.loader import render_to_string
@@ -18,10 +25,41 @@ def _brand_rgba(hex_color: str, alpha: float) -> str:
         return f"rgba(26,111,219,{alpha})"
 
 
+def _logo_data_uri(tenant):
+    if not tenant.logo_url:
+        return ""
+    path = urlparse(tenant.logo_url).path
+    extension = Path(path).suffix.lower()
+    if extension not in {".png", ".jpg", ".jpeg"}:
+        return ""
+    expected = f"{settings.MEDIA_URL}logos/{tenant.pk}{extension}"
+    if path != expected:
+        return ""
+    logo = Path(settings.MEDIA_ROOT) / "logos" / f"{tenant.pk}{extension}"
+    try:
+        if logo.stat().st_size > 5 * 1024 * 1024:
+            return ""
+        with Image.open(logo) as image:
+            if image.format not in {"PNG", "JPEG"} or image.width > 4096 or image.height > 4096:
+                return ""
+            image = ImageOps.exif_transpose(image)
+            image.thumbnail((1024, 1024))
+            mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
+            output = BytesIO()
+            image.convert(mode).save(output, format="PNG")
+        if output.tell() > 5 * 1024 * 1024:
+            return ""
+        return "data:image/png;base64," + b64encode(output.getvalue()).decode("ascii")
+    except (FileNotFoundError, UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        return ""
+
+
 def render_quote_html(quote):
     brand = (getattr(quote.tenant, "primary_color", None) or "#1a6fdb").strip()
     return render_to_string("documents/quote_pdf.html", {
+        "logo_data_uri": _logo_data_uri(quote.tenant),
         "quote": quote,
+        "items": quote.items.filter(deleted_at__isnull=True).select_related("catalog_item"),
         "brand_color": brand,
         "brand_color_light": _brand_rgba(brand, 0.08),
         "brand_color_border": _brand_rgba(brand, 0.22),
@@ -37,8 +75,10 @@ def generate_quote_pdf_response(quote, actor=None):
     html = render_quote_html(quote)
     try:
         from weasyprint import HTML
+        from weasyprint.urls import URLFetcher
 
-        pdf = HTML(string=html).write_pdf()
+        # Templates may contain user text; never fetch network or local files.
+        pdf = HTML(string=html, url_fetcher=URLFetcher(allowed_protocols={"data"}, allow_redirects=False)).write_pdf()
         content = pdf
     except ImportError:
         import logging
@@ -99,11 +139,11 @@ def generate_quote_reportlab_pdf(quote):
     header = Table(
         [
             [
-                Paragraph(quote.tenant.trade_name or quote.tenant.business_name, styles["PdfCompany"]),
+                Paragraph(escape(quote.tenant.trade_name or quote.tenant.business_name), styles["PdfCompany"]),
                 Paragraph("COTIZACION", _style(styles, "PdfHeaderSmall", alignment=TA_RIGHT)),
             ],
             [
-                Paragraph("<br/>".join(company_lines), styles["PdfHeaderSmall"]),
+                Paragraph("<br/>".join(map(escape, company_lines)), styles["PdfHeaderSmall"]),
                 Paragraph(f"#{quote.quote_number}", styles["PdfQuoteNumber"]),
             ],
             [
@@ -138,8 +178,8 @@ def generate_quote_reportlab_pdf(quote):
     parties = Table(
         [
             [Paragraph("PARA CLIENTE", _style(styles, "PdfEyebrow", textColor=brand)), Paragraph("DE EMPRESA", _style(styles, "PdfEyebrow", textColor=brand))],
-            [Paragraph(quote.client.company_name or quote.client.name, styles["PdfPartyName"]), Paragraph(quote.tenant.trade_name or quote.tenant.business_name, styles["PdfPartyName"])],
-            [Paragraph("<br/>".join(filter(None, client_lines)), styles["PdfBody"]), Paragraph("<br/>".join(filter(None, tenant_lines)), styles["PdfBody"])],
+            [Paragraph(escape(quote.client.company_name or quote.client.name), styles["PdfPartyName"]), Paragraph(escape(quote.tenant.trade_name or quote.tenant.business_name), styles["PdfPartyName"])],
+            [Paragraph("<br/>".join(map(escape, filter(None, client_lines))), styles["PdfBody"]), Paragraph("<br/>".join(map(escape, filter(None, tenant_lines))), styles["PdfBody"])],
         ],
         colWidths=[82 * mm, 82 * mm],
     )
@@ -156,7 +196,7 @@ def generate_quote_reportlab_pdf(quote):
         parties,
         Spacer(1, 12),
         Paragraph("ASUNTO / PROYECTO", styles["PdfEyebrow"]),
-        Paragraph(quote.title, styles["PdfSubject"]),
+        Paragraph(escape(quote.title), styles["PdfSubject"]),
         Spacer(1, 16),
         Paragraph("DETALLE DE PRODUCTOS Y SERVICIOS", styles["PdfEyebrow"]),
         Spacer(1, 5),
@@ -164,14 +204,14 @@ def generate_quote_reportlab_pdf(quote):
 
     rows = [["#", "Descripcion", "Cant.", "Unidad", "P. unitario", "Desc.", "Subtotal"]]
     for item in quote.items.filter(deleted_at__isnull=True):
-        description = Paragraph(str(item.description), styles["PdfItem"])
+        description = Paragraph(escape(str(item.description)), styles["PdfItem"])
         if item.catalog_item_id and getattr(item.catalog_item, "sku", ""):
-            description = Paragraph(f"{item.description}<br/><font color='#94a3b8' size='7'>SKU: {item.catalog_item.sku}</font>", styles["PdfItem"])
+            description = Paragraph(f"{escape(item.description)}<br/><font color='#94a3b8' size='7'>SKU: {escape(item.catalog_item.sku)}</font>", styles["PdfItem"])
         rows.append([
             Paragraph(str(item.position), styles["PdfCenter"]),
             description,
             Paragraph(f"{item.quantity:.2f}", styles["PdfCenter"]),
-            Paragraph(item.unit, styles["PdfCenter"]),
+            Paragraph(escape(item.unit), styles["PdfCenter"]),
             Paragraph(f"{quote.currency} {item.unit_price:.2f}", styles["PdfRight"]),
             Paragraph("-" if not item.discount_amount else f"{quote.currency} {item.discount_amount:.2f}", _style(styles, "PdfRight", textColor=danger)),
             Paragraph(f"{quote.currency} {item.line_total:.2f}", _style(styles, "PdfRight", fontName="Helvetica-Bold")),
@@ -195,9 +235,9 @@ def generate_quote_reportlab_pdf(quote):
 
     note_parts = []
     if quote.notes:
-        note_parts.extend([Paragraph("NOTAS PARA EL CLIENTE", styles["PdfEyebrow"]), Paragraph(quote.notes, styles["PdfBody"]), Spacer(1, 8)])
+        note_parts.extend([Paragraph("NOTAS PARA EL CLIENTE", styles["PdfEyebrow"]), Paragraph(escape(quote.notes), styles["PdfBody"]), Spacer(1, 8)])
     if quote.terms_conditions:
-        note_parts.extend([Paragraph("TERMINOS Y CONDICIONES", styles["PdfEyebrow"]), Paragraph(quote.terms_conditions, styles["PdfBody"])])
+        note_parts.extend([Paragraph("TERMINOS Y CONDICIONES", styles["PdfEyebrow"]), Paragraph(escape(quote.terms_conditions), styles["PdfBody"])])
     if not note_parts:
         note_parts = [Paragraph("NOTAS", styles["PdfEyebrow"]), Paragraph("Sin notas adicionales.", styles["PdfBody"])]
 
@@ -239,7 +279,7 @@ def generate_quote_reportlab_pdf(quote):
     story.append(KeepTogether(summary))
 
     footer_text = quote.tenant.default_footer_text or "Este documento fue generado digitalmente y es valido sin firma fisica."
-    story.extend([Spacer(1, 14), Paragraph(footer_text, styles["PdfSmallMuted"])])
+    story.extend([Spacer(1, 14), Paragraph(escape(footer_text), styles["PdfSmallMuted"])])
     doc.build(story, onFirstPage=_draw_page_footer(quote), onLaterPages=_draw_page_footer(quote))
     return buffer.getvalue()
 

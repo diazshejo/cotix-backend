@@ -1,11 +1,17 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.common.models import BaseModel
 from apps.tenants.services.plans import PLAN_CHOICES as TENANT_PLAN_CHOICES
 from apps.tenants.services.plans import PLAN_FREE, PlanService
+
+
+def default_trial_ends_at():
+    return timezone.now() + timedelta(days=30)
 
 
 class Tenant(BaseModel):
@@ -43,9 +49,11 @@ class Tenant(BaseModel):
     quote_digits = models.PositiveSmallIntegerField(default=4)
     plan = models.CharField(max_length=20, choices=PLAN_CHOICES, default=PLAN_FREE)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="demo")
+    trial_ends_at = models.DateTimeField(default=default_trial_ends_at)
     is_active = models.BooleanField(default=True)
     stripe_customer_id = models.CharField(max_length=255, blank=True, default="")
     stripe_subscription_id = models.CharField(max_length=255, blank=True, default="")
+    stripe_subscription_created = models.BigIntegerField(default=0)
 
     class Meta:
         ordering = ["business_name"]
@@ -55,6 +63,7 @@ class Tenant(BaseModel):
                 name="ck_tenant_tax_rate_0_100",
             ),
             models.CheckConstraint(condition=Q(quote_next_number__gte=1), name="ck_tenant_quote_next_number_gte_1"),
+            models.CheckConstraint(condition=Q(quote_digits__gte=1) & Q(quote_digits__lte=10), name="ck_tenant_quote_digits_1_10"),
             models.CheckConstraint(condition=Q(default_currency__in=["GTQ", "USD"]), name="ck_tenant_currency_allowed"),
         ]
 
@@ -63,3 +72,9 @@ class Tenant(BaseModel):
 
     def has_feature(self, feature_code):
         return PlanService.has_feature(self, feature_code)
+
+
+class StripeWebhookEvent(models.Model):
+    event_id = models.CharField(max_length=255, primary_key=True)
+    event_type = models.CharField(max_length=100)
+    processed_at = models.DateTimeField(auto_now_add=True)

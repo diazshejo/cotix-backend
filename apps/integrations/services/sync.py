@@ -22,6 +22,7 @@ class CatalogSyncEngine:
         self.triggered_by = triggered_by
         self.triggered_by_user = triggered_by_user
         self.records = records
+        self.source_complete = records is not None
         self.seen_external_ids = set()
         self.now = timezone.now()
 
@@ -47,7 +48,8 @@ class CatalogSyncEngine:
             filtered_records = apply_filters(raw_records, self.integration.pre_import_filters)
             self.log.total_fetched = len(filtered_records)
             self._upsert_records(filtered_records)
-            self._deactivate_absent_products()
+            if not self.log.error_count and self.source_complete:
+                self._deactivate_absent_products()
             status = "partial" if self.log.error_count else "success"
             self._finalize(status)
         except IntegrationError as exc:
@@ -63,7 +65,10 @@ class CatalogSyncEngine:
         if self.records is not None:
             return self.records
         if self.integration.integration_type == "rest_api":
-            return RestAPIFetcher(self.integration).fetch_all()
+            fetcher = RestAPIFetcher(self.integration)
+            records = fetcher.fetch_all()
+            self.source_complete = fetcher.complete
+            return records
         return []
 
     @transaction.atomic

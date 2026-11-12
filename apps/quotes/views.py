@@ -38,6 +38,7 @@ from apps.quotes.services import (
     validate_status_transition,
 )
 from apps.tenants.services.plans import QUOTA_MONTHLY_QUOTES, PlanService
+from apps.tenants.models import Tenant
 
 
 class PlanUsageView(APIView):
@@ -118,9 +119,12 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
 
         return qs
 
+    @transaction.atomic
     def perform_create(self, serializer):
         tenant = getattr(self.request.user, "tenant", None)
         if tenant and not self.request.user.is_super_admin:
+            tenant = Tenant.objects.select_for_update().get(pk=tenant.pk)
+            PlanService.require_active_trial(tenant)
             PlanService.require_quota(tenant, QUOTA_MONTHLY_QUOTES, count_monthly_quotes(tenant))
         serializer.save()
 
@@ -134,6 +138,10 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def duplicate(self, request, pk=None):
         source = self.get_object()
+        if not request.user.is_super_admin:
+            tenant = Tenant.objects.select_for_update().get(pk=source.tenant_id)
+            PlanService.require_active_trial(tenant)
+            PlanService.require_quota(tenant, QUOTA_MONTHLY_QUOTES, count_monthly_quotes(tenant))
         quote = Quote.objects.create(
             tenant=source.tenant,
             quote_number=next_quote_number(source.tenant),
@@ -147,7 +155,8 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             internal_notes=source.internal_notes,
             notes=source.notes,
             terms_conditions=source.terms_conditions,
-            tax_rate_snapshot=source.tenant.tax_rate,
+            tax_rate_snapshot=source.tax_rate_snapshot,
+            prices_include_tax_snapshot=source.prices_include_tax_snapshot,
         )
         for item in source.items.filter(deleted_at__isnull=True):
             quote.items.create(
@@ -185,6 +194,21 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             actor=request.user,
         )
         return Response(result)
+
+    @action(detail=True, methods=["post"])
+    @transaction.atomic
+    def publish(self, request, pk=None):
+        quote = self.get_queryset().select_for_update(of=("self",)).get(pk=self.get_object().pk)
+        validate_quote_ready(quote)
+        if is_quote_expired(quote):
+            raise ValidationError({"detail": "No puedes compartir una cotización vencida."})
+        validate_status_transition(quote.status, Quote.Status.SENT)
+        if quote.status == Quote.Status.DRAFT:
+            quote.status = Quote.Status.SENT
+            quote.save(update_fields=["status", "updated_at"])
+            log_quote_activity(quote, "published", actor=request.user, message="Quote shared by public link.")
+            log_security_event("quote_status_changed", request=request, tenant=quote.tenant, metadata={"quote": quote.quote_number, "status": "sent"})
+        return Response(self.get_serializer(quote).data)
 
     @action(detail=True, methods=["get"])
     def pdf(self, request, pk=None):
@@ -236,15 +260,20 @@ class QuoteItemViewSet(viewsets.ModelViewSet):
         if quote.status != Quote.Status.DRAFT:
             raise ValidationError({"detail": "Solo puedes modificar items de cotizaciones en borrador."})
 
+    def _validate_catalog_item(self, catalog_item, quote: Quote) -> None:
+        if catalog_item is None:
+            return
+        if catalog_item.tenant_id != quote.tenant_id:
+            raise ValidationError({"catalog_item": ["El item de catalogo no pertenece a tu tenant."]})
+        if not catalog_item.is_active or catalog_item.deleted_at:
+            raise ValidationError({"catalog_item": ["No puedes usar items de catalogo inactivos."]})
+
     def _apply_catalog_defaults(self, validated_data: dict, quote: Quote) -> dict:
         """Rellena campos desde catalog_item y valida que los obligatorios estén presentes."""
         catalog_item = validated_data.get("catalog_item")
         extra: dict = {}
         if catalog_item:
-            if catalog_item.tenant_id != quote.tenant_id:
-                raise ValidationError({"catalog_item": ["El item de catalogo no pertenece a tu tenant."]})
-            if not catalog_item.is_active or catalog_item.deleted_at:
-                raise ValidationError({"catalog_item": ["No puedes usar items de catalogo inactivos."]})
+            self._validate_catalog_item(catalog_item, quote)
             if not validated_data.get("description"):
                 extra["description"] = catalog_item.description or catalog_item.name
             if not validated_data.get("unit"):
@@ -282,6 +311,8 @@ class QuoteItemViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         quote = serializer.instance.quote
         self._require_draft(quote)
+        if "catalog_item" in serializer.validated_data:
+            self._validate_catalog_item(serializer.validated_data["catalog_item"], quote)
         serializer.save()
         recalculate_quote(quote)
 
@@ -299,14 +330,17 @@ class PublicQuoteView(APIView):
 
     def _get_quote(self, token):
         return get_object_or_404(
-            Quote.objects.select_related("tenant", "client").prefetch_related("items"),
+            Quote.objects.select_for_update(of=("self",)).select_related("tenant", "client").prefetch_related("items"),
             public_token=token,
             deleted_at__isnull=True,
         )
 
     @extend_schema(responses=QuoteSerializer)
+    @transaction.atomic
     def get(self, request, token):
         quote = self._get_quote(token)
+        if quote.status == Quote.Status.DRAFT:
+            raise PermissionDenied("Esta cotización aún no está disponible para el cliente.")
         if is_quote_expired(quote) and quote.status in {Quote.Status.DRAFT, Quote.Status.SENT, Quote.Status.VIEWED}:
             validate_status_transition(quote.status, Quote.Status.EXPIRED)
             quote.status = Quote.Status.EXPIRED
@@ -331,12 +365,35 @@ class PublicQuoteRespondView(APIView):
     throttle_classes = [PublicQuoteRespondThrottle]
 
     @extend_schema(request=PublicQuoteResponseSerializer, responses=QuoteSerializer)
+    @transaction.atomic
     def post(self, request, token):
-        quote = get_object_or_404(Quote, public_token=token, deleted_at__isnull=True)
+        quote = get_object_or_404(
+            Quote.objects.select_for_update().select_related("tenant", "client"),
+            public_token=token, deleted_at__isnull=True,
+        )
         serializer = PublicQuoteResponseSerializer(data=request.data, context={"quote": quote, "request": request})
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        try:
+            serializer.save()
+        except ValidationError as exc:
+            if quote.status == Quote.Status.EXPIRED:
+                return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+            raise
         return Response({"status": quote.status})
+
+
+class PublicQuotePdfView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [PublicQuoteViewThrottle]
+
+    def get(self, request, token):
+        quote = get_object_or_404(
+            Quote.objects.select_related("tenant", "client"),
+            public_token=token, deleted_at__isnull=True,
+        )
+        if quote.status == Quote.Status.DRAFT:
+            raise PermissionDenied("Esta cotización aún no está disponible para el cliente.")
+        return generate_quote_pdf_response(quote)
 
 
 class DashboardReportView(APIView):
@@ -349,7 +406,20 @@ class DashboardReportView(APIView):
         return qs.filter(tenant=request.user.tenant)
 
     def get(self, request):
-        queryset = self._get_queryset(request)
+        currency = request.query_params.get("currency", "GTQ")
+        if currency not in {"GTQ", "USD"}:
+            raise ValidationError({"currency": ["Moneda no válida."]})
+        period = request.query_params.get("period", "month")
+        if period not in {"week", "month", "quarter", "year"}:
+            raise ValidationError({"period": ["Periodo no válido."]})
+        today = timezone.localdate()
+        starts = {
+            "week": today - datetime.timedelta(days=today.weekday()),
+            "month": today.replace(day=1),
+            "quarter": today.replace(month=((today.month - 1) // 3) * 3 + 1, day=1),
+            "year": today.replace(month=1, day=1),
+        }
+        queryset = self._get_queryset(request).filter(currency=currency, issue_date__range=(starts[period], today))
         total_quoted = queryset.aggregate(value=Sum("total"))["value"] or 0
         total_accepted = queryset.filter(status=Quote.Status.ACCEPTED).aggregate(value=Sum("total"))["value"] or 0
         sent_statuses = [Quote.Status.SENT, Quote.Status.VIEWED, Quote.Status.ACCEPTED, Quote.Status.REJECTED]
@@ -371,10 +441,8 @@ class DashboardReportView(APIView):
             .annotate(times_quoted=Count("id"), total_amount=Sum("line_total"))
             .order_by("-times_quoted")[:5]
         )
-        six_months_ago = timezone.localdate() - datetime.timedelta(days=181)
         monthly_raw = (
             queryset
-            .filter(issue_date__gte=six_months_ago)
             .annotate(month=TruncMonth("issue_date"))
             .values("month")
             .annotate(
@@ -394,6 +462,7 @@ class DashboardReportView(APIView):
         ]
         return Response(
             {
+                "currency": currency,
                 "total_quoted": total_quoted,
                 "total_accepted": total_accepted,
                 "conversion_rate": conversion_rate,

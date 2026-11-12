@@ -1,8 +1,10 @@
 import logging
-import os
+from io import BytesIO
+from pathlib import Path
 
 import stripe
 from django.conf import settings
+from PIL import Image, ImageOps, UnidentifiedImageError
 from rest_framework.generics import RetrieveUpdateAPIView
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -10,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.common.audit import log_security_event
-from apps.common.permissions import TenantSettingsPermission, TenantUserAdminPermission
+from apps.common.permissions import TenantBillingPermission, TenantSettingsPermission
 from apps.tenants.models import Tenant
 from apps.tenants.serializers import TenantSerializer
 from apps.tenants.services.billing import BillingService
@@ -39,13 +41,25 @@ class LogoUploadView(APIView):
         else:
             tenant = request.user.tenant
 
-        ext = os.path.splitext(file.name)[1].lower() or ".png"
-        rel_path = f"logos/{tenant.pk}{ext}"
-        abs_path = os.path.join(settings.MEDIA_ROOT, rel_path)
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        with open(abs_path, "wb+") as dst:
-            for chunk in file.chunks():
-                dst.write(chunk)
+        if tenant is None:
+            return Response({"logo": ["No se encontró la empresa."]}, status=404)
+        try:
+            image = Image.open(file)
+            if image.format not in {"PNG", "JPEG"} or image.width > 4096 or image.height > 4096:
+                raise ValueError("Formato o tamaño de imagen no permitido.")
+            image = ImageOps.exif_transpose(image)
+            image.thumbnail((1024, 1024))
+            mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
+            output = BytesIO()
+            image.convert(mode).save(output, format="PNG")
+            if output.tell() > _LOGO_MAX_BYTES:
+                raise ValueError("La imagen procesada supera el tamaño permitido.")
+        except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+            return Response({"logo": ["El archivo no es una imagen PNG o JPG válida de hasta 4096 píxeles."]}, status=400)
+        rel_path = f"logos/{tenant.pk}.png"
+        abs_path = Path(settings.MEDIA_ROOT) / rel_path
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(output.getvalue())
 
         logo_url = request.build_absolute_uri(settings.MEDIA_URL + rel_path)
         tenant.logo_url = logo_url
@@ -74,7 +88,7 @@ class TenantSettingsView(RetrieveUpdateAPIView):
 
 
 class BillingCheckoutView(APIView):
-    permission_classes = [IsAuthenticated, TenantUserAdminPermission]
+    permission_classes = [IsAuthenticated, TenantBillingPermission]
 
     def post(self, request):
         plan = request.data.get("plan", "")
@@ -103,7 +117,7 @@ class BillingCheckoutView(APIView):
 
 
 class BillingPortalView(APIView):
-    permission_classes = [IsAuthenticated, TenantUserAdminPermission]
+    permission_classes = [IsAuthenticated, TenantBillingPermission]
 
     def post(self, request):
         try:

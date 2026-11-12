@@ -31,6 +31,7 @@ def recalculate_quote(quote):
     subtotal = Decimal("0.00")
     discount_total = Decimal("0.00")
     taxable_base = Decimal("0.00")
+    taxable_gross = Decimal("0.00")
 
     for item in quote.items.filter(deleted_at__isnull=True):
         line_subtotal, discount_amount, line_total = calculate_line(item)
@@ -41,14 +42,22 @@ def recalculate_quote(quote):
         subtotal += line_subtotal
         discount_total += discount_amount
         if item.taxable:
-            taxable_base += line_total
+            if quote.prices_include_tax_snapshot:
+                taxable_gross += line_total
+            else:
+                taxable_base += line_total
 
-    total_tax = money(taxable_base * (quote.tax_rate_snapshot / Decimal("100")))
+    if quote.prices_include_tax_snapshot:
+        rate = quote.tax_rate_snapshot / Decimal("100")
+        taxable_base = money(taxable_gross / (Decimal("1") + rate))
+        total_tax = money(taxable_gross - taxable_base)
+    else:
+        total_tax = money(taxable_base * (quote.tax_rate_snapshot / Decimal("100")))
     quote.subtotal = money(subtotal)
     quote.discount_total = money(discount_total)
     quote.taxable_base = money(taxable_base)
     quote.total_tax = total_tax
-    quote.total = money(quote.subtotal - quote.discount_total + total_tax)
+    quote.total = money(quote.subtotal - quote.discount_total + (Decimal("0") if quote.prices_include_tax_snapshot else total_tax))
     quote.save(
         update_fields=[
             "subtotal",
@@ -115,11 +124,10 @@ def log_quote_activity(quote, event, actor=None, message="", metadata=None):
 
 
 def count_monthly_quotes(tenant) -> int:
-    """Cuenta cotizaciones no eliminadas creadas en el mes calendario actual."""
+    """Count all quotes created this month, including deleted drafts, for plan quotas."""
     now = timezone.now()
     return Quote.objects.filter(
         tenant=tenant,
-        deleted_at__isnull=True,
         created_at__year=now.year,
         created_at__month=now.month,
     ).count()

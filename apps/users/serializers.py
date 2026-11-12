@@ -254,4 +254,6 @@ class ResetPasswordSerializer(serializers.Serializer):
         user.set_password(self.validated_data["password"])
         user.save(update_fields=["password", "updated_at"])
         self._token_obj.mark_used()
+        from apps.telemetry.services.session import revoke_all_user_sessions
+        revoke_all_user_sessions(user)
         return user

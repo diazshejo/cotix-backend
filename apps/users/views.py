@@ -1,14 +1,21 @@
 import logging
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import status, viewsets
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework.generics import CreateAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.utils import get_md5_hash_password
+from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils import extend_schema
 
 from apps.common.audit import get_client_ip, log_security_event
@@ -20,15 +27,18 @@ from apps.common.throttles import (
     VerifyEmailResendThrottle,
     VerifyEmailThrottle,
 )
-from apps.telemetry.models import AuthEvent
+from apps.telemetry.models import AuthEvent, UserSession
 from apps.telemetry.services.auth_telemetry import log_auth_event
 from apps.telemetry.services.session import (
     compute_device_fingerprint,
     create_session,
     is_known_device,
+    touch_session,
 )
 from apps.telemetry.services.user_agent import parse_user_agent
 from apps.tenants.services.plans import QUOTA_MAX_USERS, PlanService
+from apps.tenants.models import Tenant
+from apps.users.authentication import require_active_session
 from apps.users.models import User
 from apps.users.serializers import (
     CotixTokenObtainPairSerializer,
@@ -127,9 +137,7 @@ class LoginView(TokenObtainPairView):
             raise
 
         user = User.objects.filter(email__iexact=email).first()
-        refresh_token = response.data.pop("refresh", None)
-        if refresh_token:
-            set_refresh_cookie(response, refresh_token)
+        response.data.pop("refresh", None)
 
         # Session tracking and new-device detection
         raw_ua = request.META.get("HTTP_USER_AGENT", "")[:500]
@@ -144,6 +152,13 @@ class LoginView(TokenObtainPairView):
             device_type=ua_data["device_type"],
             user_agent=raw_ua,
         ) if user else None
+
+        if session is None:
+            raise AuthenticationFailed("No se pudo crear la sesión. Intenta de nuevo.")
+        refresh = CotixTokenObtainPairSerializer.get_token(user)
+        refresh["session_id"] = str(session.pk)
+        response.data["access"] = str(refresh.access_token)
+        set_refresh_cookie(response, str(refresh))
 
         log_auth_event(
             AuthEvent.EventType.LOGIN_SUCCESS,
@@ -175,6 +190,15 @@ class RefreshView(TokenRefreshView):
         if not refresh_token:
             return Response({"detail": "Refresh token no encontrado."}, status=status.HTTP_401_UNAUTHORIZED)
 
+        try:
+            token = RefreshToken(refresh_token)
+            user = User.objects.get(pk=token.get("user_id"), is_active=True, deleted_at__isnull=True)
+            session = require_active_session(user, token)
+            if api_settings.CHECK_REVOKE_TOKEN and token.get(api_settings.REVOKE_TOKEN_CLAIM) != get_md5_hash_password(user.password):
+                raise AuthenticationFailed("Sesión inválida. Inicia sesión de nuevo.")
+        except (User.DoesNotExist, TokenError, ValueError, TypeError, DjangoValidationError):
+            raise AuthenticationFailed("Sesión inválida. Inicia sesión de nuevo.")
+        touch_session(session)
         serializer = TokenRefreshSerializer(data={"refresh": refresh_token})
         serializer.is_valid(raise_exception=True)
         response = Response(serializer.validated_data, status=status.HTTP_200_OK)
@@ -189,6 +213,18 @@ class LogoutView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        session_id = getattr(request, "current_session_id", None)
+        if session_id and request.user.is_authenticated:
+            UserSession.objects.filter(pk=session_id, user=request.user).update(revoked_at=timezone.now())
+        raw_refresh = request.COOKIES.get(settings.REFRESH_TOKEN_COOKIE_NAME)
+        if raw_refresh:
+            try:
+                token = RefreshToken(raw_refresh)
+                UserSession.objects.filter(
+                    pk=token.get("session_id"), user_id=token.get("user_id")
+                ).update(revoked_at=timezone.now())
+            except (TokenError, ValueError, TypeError, DjangoValidationError):
+                pass
         if request.user.is_authenticated:
             log_auth_event(
                 AuthEvent.EventType.LOGOUT,
@@ -341,9 +377,12 @@ class TenantUserViewSet(viewsets.ModelViewSet):
                 metadata={"target_user": user.email, "old_role": old_role, "new_role": user.role},
             )
 
+    @transaction.atomic
     def perform_create(self, serializer):
         tenant = getattr(self.request.user, "tenant", None)
         if tenant and not self.request.user.is_super_admin:
+            tenant = Tenant.objects.select_for_update().get(pk=tenant.pk)
+            PlanService.require_active_trial(tenant)
             current = User.objects.filter(tenant=tenant, deleted_at__isnull=True).count()
             PlanService.require_quota(tenant, QUOTA_MAX_USERS, current)
         user = serializer.save()

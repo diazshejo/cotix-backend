@@ -59,6 +59,16 @@ class User(BaseModel, AbstractBaseUser, PermissionsMixin):
     def is_super_admin(self):
         return self.role == self.Role.SUPER_ADMIN or self.is_superuser
 
+    def soft_delete(self):
+        from apps.telemetry.services.session import revoke_all_user_sessions
+        from django.db import transaction
+
+        with transaction.atomic():
+            self.is_active = False
+            super().soft_delete()
+            self.save(update_fields=["is_active", "updated_at"])
+            revoke_all_user_sessions(self)
+
     def __str__(self):
         return self.email
 

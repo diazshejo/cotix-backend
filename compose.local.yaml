@@ -1,0 +1,56 @@
+name: cotix
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cotix_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Define DB_PASSWORD in cotix-backend/.env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cotix_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  backend:
+    build: .
+    env_file: .env
+    environment:
+      DB_HOST: db
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - .:/app:Z
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  scheduler:
+    build: .
+    env_file: .env
+    environment:
+      DB_HOST: db
+    command: sh -c "while true; do python manage.py run_catalog_integration_syncs; sleep 60; done"
+    volumes:
+      - .:/app:Z
+    depends_on:
+      - backend
+    restart: unless-stopped
+  frontend:
+    build:
+      context: ../cotix-frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ../cotix-frontend:/app:Z
+      - frontend_modules:/app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  frontend_modules:

@@ -1,4 +1,12 @@
 from decimal import Decimal
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
+from PIL import Image
+from rest_framework.test import APIClient
 
 from django.test import TestCase
 from django.utils import timezone
@@ -100,3 +108,37 @@ class QuotePdfTemplateTests(TestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertIn("attachment;", response["Content-Disposition"])
         self.assertGreater(len(response.content), 1000)
+
+    def test_external_logo_is_never_embedded_or_fetched(self):
+        quote = self.make_quote()
+        self.tenant.logo_url = "http://127.0.0.1:12345/internal"
+        self.tenant.save(update_fields=["logo_url"])
+        html = render_quote_html(quote)
+        self.assertNotIn("127.0.0.1:12345", html)
+        response = generate_quote_pdf_response(quote, actor=self.user)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+
+    def test_logo_upload_reencodes_image_and_embeds_local_data(self):
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            client = APIClient()
+            client.force_authenticate(self.user)
+            image = BytesIO()
+            Image.new("RGB", (8, 8), "red").save(image, format="JPEG")
+            upload = SimpleUploadedFile("logo.jpg", image.getvalue(), content_type="image/jpeg")
+            response = client.post("/api/tenant/settings/logo/", {"logo": upload}, format="multipart")
+            self.assertEqual(response.status_code, 200)
+            self.tenant.refresh_from_db()
+            self.assertTrue(self.tenant.logo_url.endswith(f"/media/logos/{self.tenant.pk}.png"))
+            html = render_quote_html(self.make_quote())
+            self.assertIn("data:image/png;base64,", html)
+            self.assertNotIn(self.tenant.logo_url, html)
+
+    def test_legacy_local_jpeg_logo_remains_visible(self):
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            logo_dir = Path(media_root) / "logos"
+            logo_dir.mkdir()
+            logo = logo_dir / f"{self.tenant.pk}.jpg"
+            Image.new("RGB", (8, 8), "red").save(logo, format="JPEG")
+            self.tenant.logo_url = f"http://localhost:8000/media/logos/{self.tenant.pk}.jpg"
+            self.tenant.save(update_fields=["logo_url"])
+            self.assertIn("data:image/png;base64,", render_quote_html(self.make_quote()))

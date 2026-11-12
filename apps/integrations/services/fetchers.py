@@ -4,7 +4,7 @@ import io
 import json
 import time
 from urllib import error, request
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 
 from django.conf import settings
 from rest_framework import serializers
@@ -20,21 +20,62 @@ CSV_MAX_BYTES = getattr(settings, "INTEGRATION_CSV_MAX_BYTES", 2 * 1024 * 1024)
 CSV_MAX_ROWS = getattr(settings, "INTEGRATION_CSV_MAX_ROWS", 5000)
 CSV_MAX_FIELDS = getattr(settings, "INTEGRATION_CSV_MAX_FIELDS", 50)
 CSV_MAX_CELL_LENGTH = getattr(settings, "INTEGRATION_CSV_MAX_CELL_LENGTH", 1000)
+REST_MAX_BYTES = getattr(settings, "INTEGRATION_REST_MAX_BYTES", 2 * 1024 * 1024)
+REST_MAX_ROWS = getattr(settings, "INTEGRATION_REST_MAX_ROWS", 5000)
+REST_MAX_PAGES = getattr(settings, "INTEGRATION_REST_MAX_PAGES", 100)
 
 
 class SafeRedirectHandler(request.HTTPRedirectHandler):
+    def __init__(self, allowed_origin=None):
+        self.allowed_origin = allowed_origin
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         validate_external_url(newurl)
+        target = urlparse(newurl)
+        if self.allowed_origin and (target.scheme, target.netloc) != self.allowed_origin:
+            raise IntegrationConnectionError("La redirección REST debe permanecer en el mismo origen.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class RestAPIFetcher:
     def __init__(self, integration):
         self.integration = integration
+        self.complete = False
 
     def fetch_all(self):
-        response = self._make_request()
-        return extract_array_from_response(response, self.integration.response_array_path)
+        self.complete = False
+        url = self.integration.endpoint_url
+        seen_urls = set()
+        records = []
+        for _ in range(REST_MAX_PAGES):
+            if url in seen_urls:
+                raise IntegrationConnectionError("La paginación REST contiene un ciclo.")
+            seen_urls.add(url)
+            response = self._make_request(url)
+            page = extract_array_from_response(response, self.integration.response_array_path)
+            if len(records) + len(page) > REST_MAX_ROWS:
+                raise IntegrationConnectionError("La respuesta REST supera el límite de productos.")
+            records.extend(page)
+            next_url = response.get("next") if isinstance(response, dict) else None
+            if not next_url and isinstance(response, dict) and isinstance(response.get("links"), dict):
+                next_url = response["links"].get("next")
+            if not next_url:
+                count = response.get("count") if isinstance(response, dict) else None
+                if isinstance(count, int) and count != len(records):
+                    raise IntegrationConnectionError("La respuesta REST está incompleta: el total no coincide.")
+                # Sin total ni enlace de paginación no podemos probar que el catálogo esté completo.
+                self.complete = (isinstance(count, int) and count == len(records)) or len(seen_urls) > 1
+                return records
+            if not isinstance(next_url, str) or self.integration.http_method != "GET":
+                raise IntegrationConnectionError("La paginación REST requiere enlaces GET válidos.")
+            candidate = urljoin(url, next_url)
+            initial = urlparse(self.integration.endpoint_url)
+            target = urlparse(candidate)
+            if (target.scheme, target.netloc) != (initial.scheme, initial.netloc):
+                raise IntegrationConnectionError("La página siguiente debe pertenecer al mismo origen.")
+            validate_external_url(candidate)
+            url = candidate
+        raise IntegrationConnectionError("La paginación REST supera el límite de páginas.")
 
     def fetch_raw(self):
         return self._make_request()
@@ -57,23 +98,31 @@ class RestAPIFetcher:
             headers["Authorization"] = f"Basic {token}"
         return headers
 
-    def _make_request(self):
-        validate_external_url(self.integration.endpoint_url)
+    def _make_request(self, url=None):
+        url = url or self.integration.endpoint_url
+        validate_external_url(url)
         body = None
         headers = self.build_headers()
         method = self.integration.http_method
         if method == "POST":
             headers.setdefault("Content-Type", "application/json")
             body = (self.integration.request_body_template or "{}").encode("utf-8")
-        req = request.Request(self.integration.endpoint_url, data=body, headers=headers, method=method)
+        req = request.Request(url, data=body, headers=headers, method=method)
         for attempt, wait_seconds in enumerate((0, 1, 3), start=1):
             if wait_seconds:
                 time.sleep(wait_seconds)
             try:
-                opener = request.build_opener(SafeRedirectHandler)
+                origin = urlparse(self.integration.endpoint_url)
+                opener = request.build_opener(SafeRedirectHandler((origin.scheme, origin.netloc)))
                 with opener.open(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                     charset = response.headers.get_content_charset() or "utf-8"
-                    content = response.read().decode(charset)
+                    content_bytes = response.read(REST_MAX_BYTES + 1)
+                    if len(content_bytes) > REST_MAX_BYTES:
+                        raise IntegrationConnectionError("La respuesta REST supera el límite de tamaño.")
+                    try:
+                        content = content_bytes.decode(charset)
+                    except (UnicodeError, LookupError) as exc:
+                        raise IntegrationConnectionError("La respuesta REST tiene una codificación inválida.") from exc
                     try:
                         return json.loads(content)
                     except json.JSONDecodeError as exc:

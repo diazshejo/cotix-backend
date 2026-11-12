@@ -11,6 +11,7 @@ from apps.integrations.models import IntegrationSyncLog, TenantCatalogIntegratio
 from apps.integrations.serializers import TenantCatalogIntegrationSerializer
 from apps.integrations.services.crypto import decrypt_text, encrypt_text
 from apps.integrations.services.fetchers import CSVFetcher, RestAPIFetcher, SafeRedirectHandler
+from apps.integrations.services.exceptions import IntegrationConnectionError
 from apps.integrations.services.mappers import apply_filters, extract_array_from_response, map_record, suggest_mapping
 from apps.integrations.services.redaction import sanitize_error_message
 from apps.integrations.services.sync import CatalogSyncEngine
@@ -71,6 +72,27 @@ class SecurityAndFetcherTests(TestCase):
     def setUp(self):
         self.tenant = make_tenant("tenant-fetcher")
         self.user = make_user(self.tenant)
+
+    def test_rest_fetches_every_page_before_returning(self):
+        integration = make_integration(self.tenant, self.user)
+        fetcher = RestAPIFetcher(integration)
+        with patch.object(fetcher, "_make_request", side_effect=[
+            {"data": {"items": [{"codigo": "A"}]}, "next": "?page=2", "count": 2},
+            {"data": {"items": [{"codigo": "B"}]}, "next": None, "count": 2},
+        ]) as get_page:
+            self.assertEqual([row["codigo"] for row in fetcher.fetch_all()], ["A", "B"])
+            self.assertTrue(fetcher.complete)
+        self.assertEqual(get_page.call_args_list[-1].args[0], "https://api.example.com/products?page=2")
+
+    def test_rest_rejects_incomplete_or_external_pagination(self):
+        integration = make_integration(self.tenant, self.user)
+        fetcher = RestAPIFetcher(integration)
+        with patch.object(fetcher, "_make_request", return_value={"data": {"items": [{"codigo": "A"}]}, "count": 2}):
+            with self.assertRaises(IntegrationConnectionError):
+                fetcher.fetch_all()
+        with patch.object(fetcher, "_make_request", return_value={"data": {"items": []}, "next": "https://other.example.com/products"}):
+            with self.assertRaises(IntegrationConnectionError):
+                fetcher.fetch_all()
 
     def test_ssrf_validation_rejects_private_urls(self):
         for url in ("http://127.0.0.1:8000/products", "http://169.254.169.254/latest/meta-data", "https://localhost/products"):
@@ -192,6 +214,25 @@ class SyncEngineTests(TestCase):
         CatalogSyncEngine(self.integration, triggered_by_user=self.user, records=[]).run()
         item.refresh_from_db()
         self.assertFalse(item.is_active)
+
+    def test_partial_mapping_does_not_deactivate_missing_products(self):
+        CatalogSyncEngine(self.integration, records=[{"codigo": "A1", "descripcion": "Cemento", "precio": "10"}]).run()
+        item = CatalogItem.objects.get(integration=self.integration, external_id="A1")
+        log = CatalogSyncEngine(self.integration, records=[{"codigo": "B1", "descripcion": "Roto"}]).run()
+        item.refresh_from_db()
+        self.assertEqual(log.status, "partial")
+        self.assertTrue(item.is_active)
+
+    def test_rest_without_completeness_proof_preserves_missing_products(self):
+        CatalogSyncEngine(self.integration, records=[{"codigo": "A1", "descripcion": "Cemento", "precio": "10"}]).run()
+        item = CatalogItem.objects.get(integration=self.integration, external_id="A1")
+        with patch("apps.integrations.services.sync.RestAPIFetcher") as fetcher_cls:
+            fetcher_cls.return_value.fetch_all.return_value = []
+            fetcher_cls.return_value.complete = False
+            log = CatalogSyncEngine(self.integration).run()
+        item.refresh_from_db()
+        self.assertEqual(log.status, "success")
+        self.assertTrue(item.is_active)
 
     def test_sync_never_deactivates_manual_products(self):
         manual = CatalogItem.objects.create(

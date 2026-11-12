@@ -147,6 +147,7 @@ class QuoteSerializer(serializers.ModelSerializer):
             "discount_total",
             "taxable_base",
             "tax_rate_snapshot",
+            "prices_include_tax_snapshot",
             "total_tax",
             "total",
             "status",
@@ -171,6 +172,7 @@ class QuoteSerializer(serializers.ModelSerializer):
             "discount_total",
             "taxable_base",
             "tax_rate_snapshot",
+            "prices_include_tax_snapshot",
             "total_tax",
             "total",
             "status",
@@ -181,6 +183,13 @@ class QuoteSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["items"] = QuoteItemSerializer(
+            instance.items.filter(deleted_at__isnull=True), many=True
+        ).data
+        return data
 
     def validate_currency(self, value):
         return validate_currency(value)
@@ -242,6 +251,7 @@ class QuoteSerializer(serializers.ModelSerializer):
             created_by=request.user,
             quote_number=next_quote_number(tenant),
             tax_rate_snapshot=tenant.tax_rate,
+            prices_include_tax_snapshot=tenant.prices_include_tax,
             currency=currency,
             **validated_data,
         )
