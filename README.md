@@ -17,7 +17,7 @@ docker compose -f compose.local.yaml up --build -d
 
 Antes de arrancar, cambia `DJANGO_SECRET_KEY` y `DB_PASSWORD` en `cotix-backend/.env` por valores locales propios. Deja `DB_HOST=localhost` en ese archivo: Compose lo sustituye por `db` dentro del contenedor. La app queda en `http://localhost:5173`; la API, en `http://localhost:8000/api/`. Usa el mismo nombre de host en ambos servicios para que las cookies funcionen en desarrollo.
 
-El servicio `scheduler` ejecuta `run_catalog_integration_syncs` cada minuto. En producción, configura un único proceso programador o cron con ese comando; no levantes varias copias simultáneas. El servicio `db` guarda datos en el volumen nombrado `postgres_data`. `docker compose -f compose.local.yaml down` conserva ese volumen; `down -v` lo elimina.
+El servicio `scheduler` ejecuta `run_catalog_integration_syncs` cada minuto. En producción, configura un único proceso programador o cron con ese comando; no levantes varias copias simultáneas. El servicio `db` guarda datos en el volumen nombrado `postgres_data` y el backend guarda los logos en `media_data`, montado en `/app/media`. `docker compose -f compose.local.yaml down` conserva ambos volúmenes; `down -v` los elimina.
 
 Las notificaciones de la campana usan WebSocket en `/api/notifications/ws/`. El servicio `backend` corre Django con Daphne/ASGI y Redis distribuye avisos entre procesos. Redis no guarda las notificaciones: estas permanecen en PostgreSQL; si la conexión WebSocket falla, el frontend consulta la API periódicamente. El acceso al canal requiere la cookie de sesión válida y un `Origin` incluido en `CORS_ALLOWED_ORIGINS`. No envíes tokens en la URL del WebSocket.
 

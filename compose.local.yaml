@@ -34,6 +34,7 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - .:/app:Z
+      - media_data:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -67,3 +68,4 @@ services:
 volumes:
   postgres_data:
   frontend_modules:
+  media_data:
