@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from apps.notifications.models import Notification
 from apps.notifications.serializers import NotificationSerializer
+from apps.notifications.realtime import publish_notification_change
 
 
 class NotificationPagination(PageNumberPagination):
@@ -60,9 +61,13 @@ class NotificationViewSet(viewsets.GenericViewSet):
             read_at=now,
             updated_at=now,
         )
+        if updated:
+            publish_notification_change(request.user.pk)
         return Response({"updated": updated})
 
     @action(detail=False, methods=["delete"], url_path="clear_all")
     def clear_all(self, request):
         deleted, _ = self.get_queryset().delete()
+        if deleted:
+            publish_notification_change(request.user.pk)
         return Response({"deleted": deleted}, status=status.HTTP_200_OK)

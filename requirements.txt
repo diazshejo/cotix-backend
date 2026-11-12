@@ -8,6 +8,8 @@ drf-spectacular
 weasyprint
 reportlab
 gunicorn
+channels[daphne]>=4.3,<5
+channels-redis>=4.3,<5
 whitenoise[brotli]
 cryptography
 user-agents

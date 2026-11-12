@@ -19,6 +19,8 @@ Antes de arrancar, cambia `DJANGO_SECRET_KEY` y `DB_PASSWORD` en `cotix-backend/
 
 El servicio `scheduler` ejecuta `run_catalog_integration_syncs` cada minuto. En producción, configura un único proceso programador o cron con ese comando; no levantes varias copias simultáneas. El servicio `db` guarda datos en el volumen nombrado `postgres_data`. `docker compose -f compose.local.yaml down` conserva ese volumen; `down -v` lo elimina.
 
+Las notificaciones de la campana usan WebSocket en `/api/notifications/ws/`. El servicio `backend` corre Django con Daphne/ASGI y Redis distribuye avisos entre procesos. Redis no guarda las notificaciones: estas permanecen en PostgreSQL; si la conexión WebSocket falla, el frontend consulta la API periódicamente. El acceso al canal requiere la cookie de sesión válida y un `Origin` incluido en `CORS_ALLOWED_ORIGINS`. No envíes tokens en la URL del WebSocket.
+
 La sincronización REST sigue enlaces `next` del mismo origen hasta terminar y limita páginas, filas y tamaño por respuesta. Solo desactiva productos ausentes cuando el origen acredita un catálogo completo mediante `count` coincidente o una secuencia paginada; una respuesta aislada sin esas señales actualiza productos, pero no elimina ausentes.
 
 Para consultar logs: `docker compose -f compose.local.yaml logs -f backend frontend scheduler`. Para detener: `docker compose -f compose.local.yaml down`. No comitas `.env` ni secretos.
@@ -26,3 +28,5 @@ Para consultar logs: `docker compose -f compose.local.yaml logs -f backend front
 Antes de publicar la página comercial faltan textos legales aprobados y canales reales de soporte; los enlaces y testimonios de ejemplo se quitaron de la interfaz.
 
 En producción, la API exige una clave secreta única de al menos 50 caracteres, HTTPS, cookies de sesión `Secure` y `HttpOnly`, y orígenes explícitos para CORS y CSRF. Usa `.env.staging.example` como guía para `ACCESS_TOKEN_COOKIE_SECURE`, `REFRESH_TOKEN_COOKIE_SECURE`, `CSRF_COOKIE_SECURE`, `SESSION_COOKIE_SECURE`, `SECURE_SSL_REDIRECT` y `FRONTEND_URL`. Publica frontend y API bajo el mismo sitio para que `SameSite=Lax` permita la sesión. Configura `TRUST_PROXY_SSL_HEADER=True` solo si el backend recibe tráfico exclusivamente de un proxy confiable que establece `X-Forwarded-Proto`.
+
+Para producción configura `REDIS_URL` con autenticación y TLS (`rediss://`), y ejecuta `daphne -b 0.0.0.0 -p 8000 config.asgi:application`. El proxy HTTPS debe reenviar `Upgrade` y `Connection` para `/api/notifications/ws/`, preservar el encabezado `Origin` y permitir una conexión de larga duración. El CSP del frontend debe permitir `wss://` del origen de la API; el Dockerfile de producción lo genera desde `VITE_API_URL`. No expongas Redis a Internet.

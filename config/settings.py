@@ -27,6 +27,7 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 INSTALLED_APPS = [
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -48,6 +49,17 @@ INSTALLED_APPS = [
     "apps.documents",
     "apps.notifications",
 ]
+
+ASGI_APPLICATION = "config.asgi.application"
+REDIS_URL = config("REDIS_URL", default="")
+if not DEBUG and not REDIS_URL:
+    raise ValueError("REDIS_URL is required for production notifications.")
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer" if REDIS_URL else "channels.layers.InMemoryChannelLayer",
+        **({"CONFIG": {"hosts": [REDIS_URL], "capacity": 1000, "expiry": 60}} if REDIS_URL else {}),
+    },
+}
 
 MIDDLEWARE = [
     "apps.telemetry.middleware.RequestIdMiddleware",
