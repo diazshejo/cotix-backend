@@ -326,6 +326,7 @@ class QuoteItemViewSet(viewsets.ModelViewSet):
 
 class PublicQuoteView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [PublicQuoteViewThrottle]
 
     def _get_quote(self, token):
@@ -362,6 +363,7 @@ class PublicQuoteView(APIView):
 
 class PublicQuoteRespondView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [PublicQuoteRespondThrottle]
 
     @extend_schema(request=PublicQuoteResponseSerializer, responses=QuoteSerializer)
@@ -384,6 +386,7 @@ class PublicQuoteRespondView(APIView):
 
 class PublicQuotePdfView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [PublicQuoteViewThrottle]
 
     def get(self, request, token):

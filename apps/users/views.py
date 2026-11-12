@@ -1,6 +1,9 @@
 import logging
 
 from django.conf import settings
+from django.middleware.csrf import get_token
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -69,6 +72,18 @@ def set_refresh_cookie(response, refresh_token):
     )
 
 
+def set_access_cookie(response, access_token):
+    response.set_cookie(
+        settings.ACCESS_TOKEN_COOKIE_NAME,
+        access_token,
+        max_age=int(settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"].total_seconds()),
+        httponly=True,
+        secure=settings.ACCESS_TOKEN_COOKIE_SECURE,
+        samesite=settings.ACCESS_TOKEN_COOKIE_SAMESITE,
+        path=settings.ACCESS_TOKEN_COOKIE_PATH,
+    )
+
+
 def clear_refresh_cookie(response):
     response.delete_cookie(
         settings.REFRESH_TOKEN_COOKIE_NAME,
@@ -77,9 +92,20 @@ def clear_refresh_cookie(response):
     )
 
 
+class CsrfTokenView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        response = Response({"csrf_token": get_token(request)})
+        response["Cache-Control"] = "no-store"
+        return response
+
+
 class RegisterView(CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [RegisterThrottle]
 
     def create(self, request, *args, **kwargs):
@@ -104,9 +130,11 @@ class RegisterView(CreateAPIView):
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class LoginView(TokenObtainPairView):
     serializer_class = CotixTokenObtainPairSerializer
     throttle_classes = [LoginThrottle]
+    authentication_classes = []
 
     def post(self, request, *args, **kwargs):
         email = normalize_login_email(request.data.get("email", ""))
@@ -157,8 +185,10 @@ class LoginView(TokenObtainPairView):
             raise AuthenticationFailed("No se pudo crear la sesión. Intenta de nuevo.")
         refresh = CotixTokenObtainPairSerializer.get_token(user)
         refresh["session_id"] = str(session.pk)
-        response.data["access"] = str(refresh.access_token)
+        set_access_cookie(response, str(refresh.access_token))
         set_refresh_cookie(response, str(refresh))
+        response.data.pop("access", None)
+        response.data["ok"] = True
 
         log_auth_event(
             AuthEvent.EventType.LOGIN_SUCCESS,
@@ -182,8 +212,10 @@ class LoginView(TokenObtainPairView):
         return response
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class RefreshView(TokenRefreshView):
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get(settings.REFRESH_TOKEN_COOKIE_NAME)
@@ -202,44 +234,48 @@ class RefreshView(TokenRefreshView):
         serializer = TokenRefreshSerializer(data={"refresh": refresh_token})
         serializer.is_valid(raise_exception=True)
         response = Response(serializer.validated_data, status=status.HTTP_200_OK)
+        set_access_cookie(response, serializer.validated_data["access"])
         rotated_refresh = serializer.validated_data.get("refresh")
         if rotated_refresh:
             set_refresh_cookie(response, rotated_refresh)
-        response.data.pop("refresh", None)
+        response.data = {"ok": True}
         return response
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class LogoutView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
-        session_id = getattr(request, "current_session_id", None)
-        if session_id and request.user.is_authenticated:
-            UserSession.objects.filter(pk=session_id, user=request.user).update(revoked_at=timezone.now())
         raw_refresh = request.COOKIES.get(settings.REFRESH_TOKEN_COOKIE_NAME)
         if raw_refresh:
             try:
                 token = RefreshToken(raw_refresh)
-                UserSession.objects.filter(
+                session = UserSession.objects.select_related("user", "user__tenant").filter(
                     pk=token.get("session_id"), user_id=token.get("user_id")
-                ).update(revoked_at=timezone.now())
+                ).first()
+                if session:
+                    UserSession.objects.filter(pk=session.pk).update(revoked_at=timezone.now())
+                    log_auth_event(
+                        AuthEvent.EventType.LOGOUT,
+                        request=request,
+                        user=session.user,
+                        tenant=session.user.tenant,
+                        session=session,
+                        metadata={"email": session.user.email},
+                    )
             except (TokenError, ValueError, TypeError, DjangoValidationError):
                 pass
-        if request.user.is_authenticated:
-            log_auth_event(
-                AuthEvent.EventType.LOGOUT,
-                request=request,
-                user=request.user,
-                tenant=getattr(request.user, "tenant", None),
-                metadata={"email": request.user.email},
-            )
         response = Response({"ok": True})
         clear_refresh_cookie(response)
+        response.delete_cookie(settings.ACCESS_TOKEN_COOKIE_NAME, path=settings.ACCESS_TOKEN_COOKIE_PATH, samesite=settings.ACCESS_TOKEN_COOKIE_SAMESITE)
         return response
 
 
 class VerifyEmailView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [VerifyEmailThrottle]
 
     def post(self, request):
@@ -258,6 +294,7 @@ class VerifyEmailView(APIView):
 
 class ResendVerificationView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [VerifyEmailResendThrottle]
 
     def post(self, request):
@@ -289,6 +326,7 @@ class ResendVerificationView(APIView):
 
 class ForgotPasswordView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [PasswordResetThrottle]
 
     def post(self, request):
@@ -320,6 +358,7 @@ class ForgotPasswordView(APIView):
 
 class ResetPasswordConfirmView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
     throttle_classes = [PasswordResetThrottle]
 
     def post(self, request):

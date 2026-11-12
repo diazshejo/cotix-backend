@@ -1,4 +1,6 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.conf import settings
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
@@ -21,7 +23,16 @@ def require_active_session(user, token):
 
 class SessionJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
-        result = super().authenticate(request)
+        raw_access = request.COOKIES.get(settings.ACCESS_TOKEN_COOKIE_NAME)
+        if self.get_header(request) is not None:
+            result = super().authenticate(request)
+        elif raw_access:
+            # Cookies are sent automatically by browsers, so unsafe requests need CSRF protection.
+            SessionAuthentication().enforce_csrf(request)
+            token = self.get_validated_token(raw_access)
+            result = (self.get_user(token), token)
+        else:
+            result = None
         if result is None:
             return None
         user, token = result

@@ -11,8 +11,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config("DJANGO_SECRET_KEY", default="change-me-only-for-local-development")
 DEBUG = config("DJANGO_DEBUG", default=True, cast=bool)
 ALLOWED_HOSTS = config("DJANGO_ALLOWED_HOSTS", default="localhost,127.0.0.1,testserver").split(",")
-if not DEBUG and SECRET_KEY == "change-me-only-for-local-development":
-    raise ValueError("DJANGO_SECRET_KEY must be configured for production.")
+if not DEBUG and (len(SECRET_KEY) < 50 or SECRET_KEY.startswith(("change-me", "replace-"))):
+    raise ValueError("DJANGO_SECRET_KEY must be a strong, unique production secret of at least 50 characters.")
 
 DEFAULT_FRONTEND_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
 CORS_ALLOWED_ORIGINS = [
@@ -169,8 +169,14 @@ REFRESH_TOKEN_COOKIE_NAME = config("REFRESH_TOKEN_COOKIE_NAME", default="cotix_r
 REFRESH_TOKEN_COOKIE_PATH = config("REFRESH_TOKEN_COOKIE_PATH", default="/api/auth/")
 REFRESH_TOKEN_COOKIE_SECURE = config("REFRESH_TOKEN_COOKIE_SECURE", default=False, cast=bool)
 REFRESH_TOKEN_COOKIE_SAMESITE = config("REFRESH_TOKEN_COOKIE_SAMESITE", default="Lax")
+ACCESS_TOKEN_COOKIE_NAME = config("ACCESS_TOKEN_COOKIE_NAME", default="cotix_access")
+ACCESS_TOKEN_COOKIE_PATH = config("ACCESS_TOKEN_COOKIE_PATH", default="/api/")
+ACCESS_TOKEN_COOKIE_SECURE = config("ACCESS_TOKEN_COOKIE_SECURE", default=False, cast=bool)
+ACCESS_TOKEN_COOKIE_SAMESITE = config("ACCESS_TOKEN_COOKIE_SAMESITE", default="Lax")
 if REFRESH_TOKEN_COOKIE_SAMESITE.lower() == "none" and not REFRESH_TOKEN_COOKIE_SECURE:
     raise ValueError("REFRESH_TOKEN_COOKIE_SAMESITE=None requires REFRESH_TOKEN_COOKIE_SECURE=True.")
+if ACCESS_TOKEN_COOKIE_SAMESITE.lower() == "none" and not ACCESS_TOKEN_COOKIE_SECURE:
+    raise ValueError("ACCESS_TOKEN_COOKIE_SAMESITE=None requires ACCESS_TOKEN_COOKIE_SECURE=True.")
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Cotix API",
@@ -205,17 +211,30 @@ DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="Cotix <no-reply@cotix
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
 
 SECURE_SSL_REDIRECT = config("SECURE_SSL_REDIRECT", default=False, cast=bool)
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") if config("TRUST_PROXY_SSL_HEADER", default=False, cast=bool) else None
 SESSION_COOKIE_SECURE = config("SESSION_COOKIE_SECURE", default=False, cast=bool)
 CSRF_COOKIE_SECURE = config("CSRF_COOKIE_SECURE", default=False, cast=bool)
 SESSION_COOKIE_HTTPONLY = config("SESSION_COOKIE_HTTPONLY", default=True, cast=bool)
-CSRF_COOKIE_HTTPONLY = config("CSRF_COOKIE_HTTPONLY", default=False, cast=bool)
+SESSION_COOKIE_SAMESITE = config("SESSION_COOKIE_SAMESITE", default="Lax")
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = config("CSRF_COOKIE_SAMESITE", default="Lax")
 SECURE_HSTS_SECONDS = config("SECURE_HSTS_SECONDS", default=0, cast=int)
 SECURE_HSTS_INCLUDE_SUBDOMAINS = config("SECURE_HSTS_INCLUDE_SUBDOMAINS", default=False, cast=bool)
 SECURE_HSTS_PRELOAD = config("SECURE_HSTS_PRELOAD", default=False, cast=bool)
 SECURE_CONTENT_TYPE_NOSNIFF = config("SECURE_CONTENT_TYPE_NOSNIFF", default=True, cast=bool)
 X_FRAME_OPTIONS = config("X_FRAME_OPTIONS", default="DENY")
 USE_X_FORWARDED_HOST = config("USE_X_FORWARDED_HOST", default=False, cast=bool)
+if not DEBUG and not all((REFRESH_TOKEN_COOKIE_SECURE, ACCESS_TOKEN_COOKIE_SECURE, SESSION_COOKIE_SECURE, CSRF_COOKIE_SECURE, SECURE_SSL_REDIRECT)):
+    raise ValueError("Production requires HTTPS redirect and Secure authentication/CSRF cookies.")
+if not DEBUG and (not SESSION_COOKIE_HTTPONLY or any(value not in {"Lax", "Strict"} for value in (SESSION_COOKIE_SAMESITE, CSRF_COOKIE_SAMESITE, REFRESH_TOKEN_COOKIE_SAMESITE, ACCESS_TOKEN_COOKIE_SAMESITE))):
+    raise ValueError("Production requires HttpOnly sessions and SameSite=Lax or Strict cookies.")
+if not DEBUG:
+    if not CORS_ALLOWED_ORIGINS or any(not origin.startswith("https://") for origin in CORS_ALLOWED_ORIGINS):
+        raise ValueError("Production CORS_ALLOWED_ORIGINS must contain explicit HTTPS origins.")
+    if not CSRF_TRUSTED_ORIGINS or any(not origin.startswith("https://") for origin in CSRF_TRUSTED_ORIGINS):
+        raise ValueError("Production CSRF_TRUSTED_ORIGINS must contain explicit HTTPS origins.")
+    if FRONTEND_URL.rstrip("/") not in CORS_ALLOWED_ORIGINS or FRONTEND_URL.rstrip("/") not in CSRF_TRUSTED_ORIGINS:
+        raise ValueError("FRONTEND_URL must be allowed for CORS and CSRF in production.")
 
 # --- Stripe ---
 STRIPE_SECRET_KEY = config("STRIPE_SECRET_KEY", default="")

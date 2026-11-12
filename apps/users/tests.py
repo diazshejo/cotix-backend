@@ -26,6 +26,10 @@ COOKIE_OVERRIDES = dict(
     REFRESH_TOKEN_COOKIE_PATH="/api/auth/",
     REFRESH_TOKEN_COOKIE_SECURE=False,
     REFRESH_TOKEN_COOKIE_SAMESITE="Lax",
+    ACCESS_TOKEN_COOKIE_NAME="cotix_access_test",
+    ACCESS_TOKEN_COOKIE_PATH="/api/",
+    ACCESS_TOKEN_COOKIE_SECURE=False,
+    ACCESS_TOKEN_COOKIE_SAMESITE="Lax",
 )
 
 
@@ -259,7 +263,8 @@ class LoginTests(APITestCase):
         response = self.client.post(LOGIN_URL, {"email": "ok@example.com", "password": "Secure!Pass99"}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("access", response.data)
+        self.assertEqual(response.data, {"ok": True})
+        self.assertTrue(response.cookies[settings.ACCESS_TOKEN_COOKIE_NAME]["httponly"])
 
     def test_unverified_user_cannot_login(self):
         make_user(tenant=self.tenant, email="unverified@example.com", email_verified=False)
@@ -423,26 +428,30 @@ class AuthCookieTests(APITestCase):
         self.tenant = make_tenant()
         self.user = make_user(tenant=self.tenant, email="admin@example.com", email_verified=True)
 
-    def test_login_sets_httponly_refresh_cookie_without_exposing_refresh_json(self):
+    def test_login_sets_httponly_cookies_without_exposing_tokens(self):
         response = self.client.post(LOGIN_URL, {"email": "admin@example.com", "password": "Secure!Pass99"}, format="json")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("access", response.data)
+        self.assertNotIn("access", response.data)
         self.assertNotIn("refresh", response.data)
         cookie = response.cookies[settings.REFRESH_TOKEN_COOKIE_NAME]
         self.assertTrue(cookie["httponly"])
         self.assertEqual(cookie["path"], settings.REFRESH_TOKEN_COOKIE_PATH)
         self.assertEqual(cookie["samesite"], settings.REFRESH_TOKEN_COOKIE_SAMESITE)
+        access_cookie = response.cookies[settings.ACCESS_TOKEN_COOKIE_NAME]
+        self.assertTrue(access_cookie["httponly"])
+        self.assertEqual(access_cookie["path"], settings.ACCESS_TOKEN_COOKIE_PATH)
 
-    def test_refresh_reads_cookie_and_returns_only_access_token(self):
+    def test_refresh_reads_cookie_and_rotates_access_cookie(self):
         login_response = self.client.post(LOGIN_URL, {"email": "admin@example.com", "password": "Secure!Pass99"}, format="json")
         self.client.cookies[settings.REFRESH_TOKEN_COOKIE_NAME] = login_response.cookies[settings.REFRESH_TOKEN_COOKIE_NAME].value
 
         response = self.client.post(REFRESH_URL, {}, format="json")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("access", response.data)
+        self.assertNotIn("access", response.data)
         self.assertNotIn("refresh", response.data)
+        self.assertTrue(response.cookies[settings.ACCESS_TOKEN_COOKIE_NAME]["httponly"])
 
     def test_refresh_rejects_requests_without_refresh_cookie(self):
         response = self.client.post(REFRESH_URL, {}, format="json")
@@ -455,6 +464,7 @@ class AuthCookieTests(APITestCase):
         self.assertEqual(cookie.value, "")
         self.assertEqual(cookie["path"], settings.REFRESH_TOKEN_COOKIE_PATH)
         self.assertEqual(cookie["samesite"], settings.REFRESH_TOKEN_COOKIE_SAMESITE)
+        self.assertEqual(response.cookies[settings.ACCESS_TOKEN_COOKIE_NAME].value, "")
 
 
 # ---------------------------------------------------------------------------

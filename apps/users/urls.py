@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from apps.users.views import (
+    CsrfTokenView,
     ForgotPasswordView,
     LoginView,
     LogoutView,
@@ -19,6 +20,7 @@ router = DefaultRouter()
 router.register("users", TenantUserViewSet, basename="tenant-users")
 
 urlpatterns = [
+    path("csrf/", CsrfTokenView.as_view(), name="csrf-token"),
     path("register/", RegisterView.as_view(), name="register"),
     path("login/", LoginView.as_view(), name="login"),
     path("refresh/", RefreshView.as_view(), name="refresh"),
