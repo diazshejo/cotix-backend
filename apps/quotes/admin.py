@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from apps.quotes.models import Quote, QuoteActivityLog, QuoteItem
+from apps.quotes.models import Quote, QuoteAcceptance, QuoteActivityLog, QuoteItem
 
 
 class QuoteItemInline(admin.TabularInline):
@@ -26,6 +26,8 @@ class QuoteAdmin(admin.ModelAdmin):
         "pdf_generated_at",
         "client_first_viewed_at",
         "client_responded_at",
+        "change_request_message",
+        "revision_of",
         "created_at",
         "updated_at",
         "deleted_at",
@@ -47,6 +49,26 @@ class QuoteActivityLogAdmin(admin.ModelAdmin):
     list_filter = ("event", "created_at")
     search_fields = ("quote__quote_number", "actor__email", "message")
     readonly_fields = ("id", "quote", "actor", "event", "message", "metadata", "created_at", "updated_at", "deleted_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(QuoteAcceptance)
+class QuoteAcceptanceAdmin(admin.ModelAdmin):
+    list_display = ("quote", "signer_name", "signed_at", "snapshot_sha256")
+    search_fields = ("quote__quote_number", "signer_name", "snapshot_sha256")
+    readonly_fields = (
+        "id", "quote", "signer_name", "signature_strokes", "consent_text",
+        "quote_snapshot", "snapshot_sha256", "signed_at", "connection_ip",
+        "user_agent", "created_at", "updated_at", "deleted_at",
+    )
 
     def has_add_permission(self, request):
         return False

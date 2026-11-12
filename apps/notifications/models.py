@@ -8,6 +8,7 @@ class Notification(BaseModel):
     class Type(models.TextChoices):
         QUOTE_ACCEPTED = "quote_accepted", "Cotización aceptada"
         QUOTE_REJECTED = "quote_rejected", "Cotización rechazada"
+        QUOTE_CHANGES_REQUESTED = "quote_changes_requested", "Cambios solicitados"
         QUOTE_VIEWED   = "quote_viewed",   "Cotización vista"
         QUOTE_SENT     = "quote_sent",     "Cotización enviada"
 

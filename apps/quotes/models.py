@@ -17,6 +17,7 @@ class Quote(BaseModel):
         VIEWED = "viewed", "Viewed"
         ACCEPTED = "accepted", "Accepted"
         REJECTED = "rejected", "Rejected"
+        CHANGES_REQUESTED = "changes_requested", "Changes requested"
         EXPIRED = "expired", "Expired"
 
     tenant = models.ForeignKey("tenants.Tenant", on_delete=models.CASCADE, related_name="quotes")
@@ -49,6 +50,10 @@ class Quote(BaseModel):
     pdf_generated_at = models.DateTimeField(null=True, blank=True)
     client_first_viewed_at = models.DateTimeField(null=True, blank=True)
     client_responded_at = models.DateTimeField(null=True, blank=True)
+    change_request_message = models.TextField(blank=True)
+    revision_of = models.ForeignKey(
+        "self", on_delete=models.PROTECT, related_name="revisions", null=True, blank=True,
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -124,3 +129,20 @@ class QuoteActivityLog(BaseModel):
 
     def __str__(self):
         return f"{self.quote.quote_number} {self.event}"
+
+
+class QuoteAcceptance(BaseModel):
+    """Evidence of explicit electronic acceptance of one immutable quote revision."""
+
+    quote = models.OneToOneField(Quote, on_delete=models.PROTECT, related_name="acceptance")
+    signer_name = models.CharField(max_length=120)
+    signature_strokes = models.JSONField()
+    consent_text = models.TextField()
+    quote_snapshot = models.JSONField()
+    snapshot_sha256 = models.CharField(max_length=64)
+    signed_at = models.DateTimeField()
+    connection_ip = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+
+    def __str__(self):
+        return f"{self.quote.quote_number} signed by {self.signer_name}"

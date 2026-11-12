@@ -56,6 +56,13 @@ def _logo_data_uri(tenant):
 
 def render_quote_html(quote):
     brand = (getattr(quote.tenant, "primary_color", None) or "#1a6fdb").strip()
+    acceptance = getattr(quote, "acceptance", None)
+    signature_lines = []
+    if acceptance:
+        signature_lines = [
+            " ".join(f"{point['x'] * 1000:.1f},{point['y'] * 300:.1f}" for point in stroke)
+            for stroke in acceptance.signature_strokes
+        ]
     return render_to_string("documents/quote_pdf.html", {
         "logo_data_uri": _logo_data_uri(quote.tenant),
         "quote": quote,
@@ -63,6 +70,8 @@ def render_quote_html(quote):
         "brand_color": brand,
         "brand_color_light": _brand_rgba(brand, 0.08),
         "brand_color_border": _brand_rgba(brand, 0.22),
+        "acceptance": acceptance,
+        "signature_lines": signature_lines,
     })
 
 
@@ -107,6 +116,7 @@ def generate_quote_reportlab_pdf(quote):
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
     from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.graphics.shapes import Drawing, PolyLine
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=14 * mm, leftMargin=14 * mm, topMargin=14 * mm, bottomMargin=16 * mm)
@@ -278,7 +288,25 @@ def generate_quote_reportlab_pdf(quote):
     ]))
     story.append(KeepTogether(summary))
 
-    footer_text = quote.tenant.default_footer_text or "Este documento fue generado digitalmente y es valido sin firma fisica."
+    acceptance = getattr(quote, "acceptance", None)
+    if acceptance:
+        drawing = Drawing(420, 120)
+        for stroke in acceptance.signature_strokes:
+            coordinates = []
+            for point in stroke:
+                coordinates.extend([point["x"] * 420, (1 - point["y"]) * 120])
+            drawing.add(PolyLine(coordinates, strokeColor=ink, strokeWidth=1.8))
+        story.extend([
+            Spacer(1, 16),
+            Paragraph("ACEPTACIÓN CON FIRMA ELECTRÓNICA", styles["PdfEyebrow"]),
+            drawing,
+            Paragraph(escape(acceptance.signer_name), styles["PdfBody"]),
+            Paragraph(f"Fecha: {acceptance.signed_at:%d/%m/%Y %H:%M %Z}", styles["PdfBody"]),
+            Paragraph(escape(acceptance.consent_text), styles["PdfBody"]),
+            Paragraph(f"Huella SHA-256 de la propuesta: {acceptance.snapshot_sha256}", styles["PdfSmallMuted"]),
+        ])
+
+    footer_text = quote.tenant.default_footer_text or "Documento generado con Cotix."
     story.extend([Spacer(1, 14), Paragraph(escape(footer_text), styles["PdfSmallMuted"])])
     doc.build(story, onFirstPage=_draw_page_footer(quote), onLaterPages=_draw_page_footer(quote))
     return buffer.getvalue()

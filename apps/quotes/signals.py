@@ -36,6 +36,8 @@ def _handle_status_change(sender, instance, created, **kwargs):
             NotificationService.notify_quote_accepted(instance)
         elif new == Quote.Status.REJECTED:
             NotificationService.notify_quote_rejected(instance)
+        elif new == Quote.Status.CHANGES_REQUESTED:
+            NotificationService.notify_quote_changes_requested(instance)
         elif new == Quote.Status.VIEWED:
             NotificationService.notify_quote_viewed(instance)
     except Exception:

@@ -10,6 +10,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -23,6 +25,7 @@ from apps.documents.services import generate_quote_pdf_response, send_quote_emai
 from apps.quotes.models import Quote, QuoteItem
 from apps.quotes.serializers import (
     PublicQuoteResponseSerializer,
+    PublicQuoteSerializer,
     QuoteActivityLogSerializer,
     QuoteItemSerializer,
     QuoteListSerializer,
@@ -148,15 +151,16 @@ class QuoteViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             client=source.client,
             created_by=request.user,
             assigned_to=source.assigned_to,
-            title=f"Copy of {source.title}",
+            title=(f"Revisión de {source.title}" if source.status == Quote.Status.CHANGES_REQUESTED else f"Copia de {source.title}")[:300],
             issue_date=timezone.localdate(),
-            expiry_date=source.expiry_date,
+            expiry_date=source.expiry_date if source.expiry_date and source.expiry_date >= timezone.localdate() else None,
             currency=source.currency,
             internal_notes=source.internal_notes,
             notes=source.notes,
             terms_conditions=source.terms_conditions,
             tax_rate_snapshot=source.tax_rate_snapshot,
             prices_include_tax_snapshot=source.prices_include_tax_snapshot,
+            revision_of=source if source.status == Quote.Status.CHANGES_REQUESTED else None,
         )
         for item in source.items.filter(deleted_at__isnull=True):
             quote.items.create(
@@ -336,7 +340,7 @@ class PublicQuoteView(APIView):
             deleted_at__isnull=True,
         )
 
-    @extend_schema(responses=QuoteSerializer)
+    @extend_schema(responses=PublicQuoteSerializer)
     @transaction.atomic
     def get(self, request, token):
         quote = self._get_quote(token)
@@ -356,11 +360,10 @@ class PublicQuoteView(APIView):
             log_quote_activity(quote, "viewed", message="Client viewed public quote.")
             log_security_event("quote_public_viewed", request=request, tenant=quote.tenant, metadata={"quote": quote.quote_number})
             log_security_event("quote_status_changed", request=request, tenant=quote.tenant, metadata={"quote": quote.quote_number, "status": "viewed"})
-        data = QuoteSerializer(quote, context={"request": request}).data
-        data.pop("internal_notes", None)
-        return Response(data)
+        return Response(PublicQuoteSerializer(quote).data)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class PublicQuoteRespondView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -373,6 +376,12 @@ class PublicQuoteRespondView(APIView):
             Quote.objects.select_for_update().select_related("tenant", "client"),
             public_token=token, deleted_at__isnull=True,
         )
+        if quote.status in {Quote.Status.SENT, Quote.Status.VIEWED} and is_quote_expired(quote):
+            quote.status = Quote.Status.EXPIRED
+            quote.save(update_fields=["status", "updated_at"])
+            log_quote_activity(quote, "expired", message="Quote expired before public response.")
+            log_security_event("quote_status_changed", request=request, tenant=quote.tenant, metadata={"quote": quote.quote_number, "status": "expired"})
+            return Response({"detail": "Esta cotizacion ya vencio y no puede responderse."}, status=status.HTTP_400_BAD_REQUEST)
         serializer = PublicQuoteResponseSerializer(data=request.data, context={"quote": quote, "request": request})
         serializer.is_valid(raise_exception=True)
         try:
@@ -425,7 +434,7 @@ class DashboardReportView(APIView):
         queryset = self._get_queryset(request).filter(currency=currency, issue_date__range=(starts[period], today))
         total_quoted = queryset.aggregate(value=Sum("total"))["value"] or 0
         total_accepted = queryset.filter(status=Quote.Status.ACCEPTED).aggregate(value=Sum("total"))["value"] or 0
-        sent_statuses = [Quote.Status.SENT, Quote.Status.VIEWED, Quote.Status.ACCEPTED, Quote.Status.REJECTED]
+        sent_statuses = [Quote.Status.SENT, Quote.Status.VIEWED, Quote.Status.ACCEPTED, Quote.Status.REJECTED, Quote.Status.CHANGES_REQUESTED]
         quotes_sent = queryset.filter(status__in=sent_statuses).count()
         quotes_accepted = queryset.filter(status=Quote.Status.ACCEPTED).count()
         conversion_rate = round((quotes_accepted / quotes_sent) * 100, 2) if quotes_sent else 0
@@ -473,6 +482,7 @@ class DashboardReportView(APIView):
                 "quotes_sent": queryset.filter(status__in=[Quote.Status.SENT, Quote.Status.VIEWED]).count(),
                 "quotes_accepted": quotes_accepted,
                 "quotes_rejected": queryset.filter(status=Quote.Status.REJECTED).count(),
+                "quotes_changes_requested": queryset.filter(status=Quote.Status.CHANGES_REQUESTED).count(),
                 "avg_quote_value": queryset.aggregate(value=Avg("total"))["value"] or 0,
                 "recent_quotes": QuoteListSerializer(recent_quotes, many=True).data,
                 "expiring_quotes": QuoteListSerializer(expiring_quotes, many=True).data,

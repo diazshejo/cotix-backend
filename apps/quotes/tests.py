@@ -141,6 +141,10 @@ class ValidationHardeningTests(APITestCase):
         response = self.client.get(f"/api/public/quotes/{quote.public_token}/")
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("internal_notes", response.data)
+        self.assertNotIn("assigned_to", response.data)
+        self.assertNotIn("client", response.data)
+        self.assertNotIn("public_token", response.data)
+        self.assertNotIn("catalog_item", response.data["items"][0])
 
     def test_draft_requires_publication_before_client_can_view(self):
         quote = self.create_quote()
@@ -298,7 +302,10 @@ class ValidationHardeningTests(APITestCase):
 
     def test_security_event_public_responded_created(self):
         quote = self.create_quote(status=Quote.Status.SENT)
-        response = self.client.post(f"/api/public/quotes/{quote.public_token}/respond/", {"response": "accepted"}, format="json")
+        response = self.client.post(f"/api/public/quotes/{quote.public_token}/respond/", {
+            "response": "accepted", "signer_name": "Cliente Firmante", "consent": True,
+            "signature_strokes": [[{"x": index / 10, "y": (index % 3) / 3} for index in range(10)]],
+        }, format="json")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(SecurityEvent.objects.filter(event_type="quote_public_responded", tenant=self.tenant).exists())
 

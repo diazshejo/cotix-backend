@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="es"><body>
+<p>Hola {{ user.first_name|default:user.email }},</p>
+<p>{{ client_name }} solicitó cambios en la cotización {{ quote.quote_number }}.</p>
+<p><strong>Solicitud:</strong> {{ quote.change_request_message }}</p>
+<p><a href="{{ quote_url }}">Revisar la cotización y crear una nueva versión</a></p>
+</body></html>

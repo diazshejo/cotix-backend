@@ -1,3 +1,5 @@
+import hashlib
+import json
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
@@ -89,10 +91,11 @@ def validate_status_transition(current, target):
         return
     allowed = {
         "draft": {"sent", "expired"},
-        "sent": {"viewed", "accepted", "rejected", "expired"},
-        "viewed": {"accepted", "rejected", "expired"},
+        "sent": {"viewed", "accepted", "rejected", "changes_requested", "expired"},
+        "viewed": {"accepted", "rejected", "changes_requested", "expired"},
         "accepted": set(),
         "rejected": set(),
+        "changes_requested": set(),
         "expired": set(),
     }
     if target not in allowed.get(current, set()):
@@ -101,6 +104,50 @@ def validate_status_transition(current, target):
 
 def is_quote_expired(quote):
     return bool(quote.expiry_date and quote.expiry_date < timezone.localdate())
+
+
+def quote_acceptance_snapshot(quote):
+    """Canonical contents accepted by the signer, independent of later contact edits."""
+    snapshot = {
+        "schema_version": 1,
+        "quote_id": str(quote.pk),
+        "quote_number": quote.quote_number,
+        "tenant_id": str(quote.tenant_id),
+        "tenant_name": quote.tenant.business_name,
+        "client_id": str(quote.client_id),
+        "client_name": quote.client.company_name or quote.client.name,
+        "title": quote.title,
+        "issue_date": quote.issue_date.isoformat(),
+        "expiry_date": quote.expiry_date.isoformat() if quote.expiry_date else None,
+        "currency": quote.currency,
+        "notes": quote.notes,
+        "terms_conditions": quote.terms_conditions,
+        "subtotal": str(quote.subtotal),
+        "discount_total": str(quote.discount_total),
+        "taxable_base": str(quote.taxable_base),
+        "tax_rate_snapshot": str(quote.tax_rate_snapshot),
+        "prices_include_tax_snapshot": quote.prices_include_tax_snapshot,
+        "total_tax": str(quote.total_tax),
+        "total": str(quote.total),
+        "items": [
+            {
+                "position": item.position,
+                "description": item.description,
+                "quantity": str(item.quantity),
+                "unit": item.unit,
+                "unit_price": str(item.unit_price),
+                "discount_type": item.discount_type,
+                "discount_value": str(item.discount_value),
+                "discount_amount": str(item.discount_amount),
+                "line_subtotal": str(item.line_subtotal),
+                "line_total": str(item.line_total),
+                "taxable": item.taxable,
+            }
+            for item in quote.items.filter(deleted_at__isnull=True).order_by("position", "created_at")
+        ],
+    }
+    digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return snapshot, digest
 
 
 @transaction.atomic

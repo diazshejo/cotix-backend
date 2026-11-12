@@ -2,6 +2,7 @@ import logging
 
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db import transaction
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 
@@ -65,6 +66,37 @@ class NotificationService:
         return notification
 
     @staticmethod
+    def notify_quote_changes_requested(quote):
+        client_name = quote.client.company_name or quote.client.name
+        recipients = [quote.created_by]
+        if quote.assigned_to_id and quote.assigned_to_id != quote.created_by_id:
+            assignee = quote.assigned_to
+            if assignee and assignee.is_active and assignee.tenant_id == quote.tenant_id:
+                recipients.append(assignee)
+        notifications = []
+        for user in recipients:
+            notifications.append(NotificationService._create(
+                user=user,
+                tenant=quote.tenant,
+                quote=quote,
+                notification_type="quote_changes_requested",
+                title=f"Cambios solicitados en {quote.quote_number}",
+                message=f"{client_name} solicitó cambios: {quote.change_request_message}",
+            ))
+            NotificationService._send_email(
+                user_email=user.email,
+                subject=f"Cambios solicitados en {quote.quote_number}",
+                template="notifications/email/quote_changes_requested.html",
+                context={
+                    "user": user,
+                    "quote": quote,
+                    "client_name": client_name,
+                    "quote_url": f"{settings.FRONTEND_URL.rstrip('/')}/app/quotes/{quote.id}",
+                },
+            )
+        return notifications
+
+    @staticmethod
     def notify_quote_viewed(quote):
         from apps.notifications.models import Notification
 
@@ -104,16 +136,19 @@ class NotificationService:
     def _send_email(*, user_email, subject, template, context):
         if not user_email:
             return
-        try:
-            html_body = render_to_string(template, context)
-            text_body = strip_tags(html_body)
-            send_mail(
-                subject=subject,
-                message=text_body,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[user_email],
-                html_message=html_body,
-                fail_silently=True,
-            )
-        except Exception:
-            logger.exception("Failed to send notification email to %s", user_email)
+        def deliver():
+            try:
+                html_body = render_to_string(template, context)
+                text_body = strip_tags(html_body)
+                send_mail(
+                    subject=subject,
+                    message=text_body,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user_email],
+                    html_message=html_body,
+                    fail_silently=True,
+                )
+            except Exception:
+                logger.exception("Failed to send notification email to %s", user_email)
+
+        transaction.on_commit(deliver)

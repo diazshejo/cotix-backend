@@ -7,8 +7,10 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from apps.clients.models import Client
-from apps.quotes.models import Quote, QuoteActivityLog, QuoteItem
+from apps.quotes.models import Quote, QuoteAcceptance, QuoteActivityLog, QuoteItem
 from apps.quotes.services import recalculate_quote
+from apps.documents.services import render_quote_html
+from apps.notifications.models import Notification
 from apps.tenants.models import Tenant
 from apps.users.models import User
 
@@ -118,6 +120,67 @@ class QuoteReleaseFlowTests(APITestCase):
         quote.refresh_from_db()
         self.assertEqual(quote.status, Quote.Status.EXPIRED)
 
+    def test_request_changes_requires_detail_and_preserves_original_for_revision(self):
+        quote = self.create_quote(status=Quote.Status.SENT)
+        self.client.force_authenticate(None)
+        url = f"/api/public/quotes/{quote.public_token}/respond/"
+        self.assertEqual(self.client.post(url, {"response": "changes_requested", "message": "short"}, format="json").status_code, 400)
+        response = self.client.post(url, {"response": "changes_requested", "message": "Necesito dos horas adicionales de servicio."}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        quote.refresh_from_db()
+        self.assertEqual(quote.status, Quote.Status.CHANGES_REQUESTED)
+        self.assertIn("dos horas", quote.change_request_message)
+        self.assertTrue(Notification.objects.filter(quote=quote, notification_type="quote_changes_requested").exists())
+        self.assertEqual(self.client.post(url, {"response": "rejected"}, format="json").status_code, 400)
+        self.client.force_authenticate(self.user)
+        revision = self.client.post(f"/api/quotes/{quote.pk}/duplicate/")
+        self.assertEqual(revision.status_code, 201, revision.data)
+        self.assertEqual(revision.data["status"], Quote.Status.DRAFT)
+        self.assertEqual(str(revision.data["revision_of"]), str(quote.pk))
+        self.assertNotEqual(revision.data["public_token"], quote.public_token)
+        self.assertEqual(Quote.objects.get(pk=quote.pk).total, Quote.objects.get(pk=revision.data["id"]).total)
+
+    def test_acceptance_requires_valid_signature_and_records_evidence(self):
+        quote = self.create_quote(status=Quote.Status.SENT)
+        self.client.force_authenticate(None)
+        url = f"/api/public/quotes/{quote.public_token}/respond/"
+        self.assertEqual(self.client.post(url, {"response": "accepted"}, format="json").status_code, 400)
+        invalid = {"response": "accepted", "signer_name": "Buyer Name", "consent": True,
+                   "signature_strokes": [[{"x": 2, "y": 0.5}] * 8]}
+        self.assertEqual(self.client.post(url, invalid, format="json").status_code, 400)
+        self.assertFalse(QuoteAcceptance.objects.filter(quote=quote).exists())
+        signed = {"response": "accepted", "signer_name": "Buyer Name", "consent": True,
+                  "signature_strokes": [[{"x": index / 10, "y": (index % 3) / 3} for index in range(10)]]}
+        response = self.client.post(url, signed, format="json", HTTP_USER_AGENT="Cotix test")
+        self.assertEqual(response.status_code, 200, response.data)
+        evidence = QuoteAcceptance.objects.get(quote=quote)
+        self.assertEqual(evidence.signer_name, "Buyer Name")
+        self.assertEqual(evidence.quote_snapshot["total"], str(quote.total))
+        self.assertEqual(len(evidence.snapshot_sha256), 64)
+        self.assertIn(evidence.snapshot_sha256, render_quote_html(quote))
+        public = self.client.get(f"/api/public/quotes/{quote.public_token}/")
+        self.assertEqual(public.data["acceptance"]["signer_name"], "Buyer Name")
+        self.assertEqual(public.data["consent_text"], evidence.consent_text)
+        self.assertNotIn("signature_strokes", public.data["acceptance"])
+        self.assertNotIn("connection_ip", str(public.data))
+        pdf = self.client.get(f"/api/public/quotes/{quote.public_token}/pdf/")
+        self.assertEqual(pdf.status_code, 200)
+        self.assertTrue(pdf.content.startswith(b"%PDF"))
+        self.client.force_authenticate(self.user)
+        internal = self.client.get(f"/api/quotes/{quote.pk}/")
+        self.assertEqual(internal.status_code, 200)
+        self.assertEqual(internal.data["acceptance"]["signature_strokes"], evidence.signature_strokes)
+        self.assertEqual(self.client.post(url, signed, format="json").status_code, 400)
+
+    def test_public_response_requires_csrf_token_in_browser(self):
+        quote = self.create_quote(status=Quote.Status.SENT)
+        browser = APIClient(enforce_csrf_checks=True)
+        url = f"/api/public/quotes/{quote.public_token}/respond/"
+        self.assertEqual(browser.post(url, {"response": "rejected"}, format="json").status_code, 403)
+        token = browser.get("/api/auth/csrf/").data["csrf_token"]
+        response = browser.post(url, {"response": "rejected"}, format="json", HTTP_X_CSRFTOKEN=token)
+        self.assertEqual(response.status_code, 200, response.data)
+
 
 class PublicResponseConcurrencyTests(TransactionTestCase):
     def test_only_first_public_response_changes_quote(self):
@@ -136,7 +199,9 @@ class PublicResponseConcurrencyTests(TransactionTestCase):
             try:
                 return APIClient().post(
                     f"/api/public/quotes/{quote.public_token}/respond/",
-                    {"response": decision}, format="json",
+                    {"response": decision, **({"signer_name": "Buyer Name", "consent": True,
+                        "signature_strokes": [[{"x": index / 10, "y": (index % 3) / 3} for index in range(10)]]}
+                        if decision == "accepted" else {})}, format="json",
                 ).status_code
             finally:
                 close_old_connections()
